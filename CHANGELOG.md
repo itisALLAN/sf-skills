@@ -1,3 +1,12 @@
+# [1.12.0](https://github.com/forcedotcom/sf-skills/compare/1.11.0...1.12.0) (2026-05-29)
+
+
+### Features
+
+* Release: implementing-ui-bundle-agentforce-conversation-client skill enhancements @W-22725526@ ([434e1ce](https://github.com/forcedotcom/sf-skills/commit/434e1ce8d7e3db837bff3872034eae6a54fe049b))
+
+
+
 # [1.11.0](https://github.com/forcedotcom/sf-skills/compare/1.10.0...1.11.0) (2026-05-24)
 
 
