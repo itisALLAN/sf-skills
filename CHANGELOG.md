@@ -1,3 +1,12 @@
+# [1.13.0](https://github.com/forcedotcom/sf-skills/compare/1.12.0...1.13.0) (2026-06-01)
+
+
+### Features
+
+* release: building-mobile-apps skill @W-22776680@ ([ca3074c](https://github.com/forcedotcom/sf-skills/commit/ca3074c5683de08f3a88f7e9f37ef9016c5396a9))
+
+
+
 # [1.12.0](https://github.com/forcedotcom/sf-skills/compare/1.11.0...1.12.0) (2026-05-29)
 
 
