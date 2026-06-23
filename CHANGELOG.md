@@ -1,3 +1,12 @@
+# [1.19.0](https://github.com/forcedotcom/sf-skills/compare/1.18.0...1.19.0) (2026-06-23)
+
+
+### Features
+
+* release 10 new devops-testing skills: analyzing-test-failures, checking-devops-prerequisites, configuring-quality-gate, configuring-test-provider, creating-fix-work-item, managing-suite-assignments, polling-test-results, recommending-devops-tests, running-devops-test-suite, syncing-test-providers @W-23143960@ ([a35d50a](https://github.com/forcedotcom/sf-skills/commit/a35d50a3dd2b84b459571d4d5577b092810a5a17))
+
+
+
 # [1.18.0](https://github.com/forcedotcom/sf-skills/compare/1.17.0...1.18.0) (2026-06-19)
 
 
