@@ -20,32 +20,30 @@ Operate Salesforce Archive (also called Trusted Services Archive) through its Co
 
 Gather or infer before acting:
 
-- **Operation intent**: search, view, unarchive, analyze, mask, RTBF, storage check, or job-status/log lookup.
+- **Operation intent**: search (this is also how you view archived records), unarchive, analyze, mask, RTBF, storage check, or job-status/log lookup.
 - **Target sObject** (`sobjectName`): required for search and unarchive.
 - **Filters**: search and unarchive require `sobjectName` + at least one filter.
 - **For log downloads**: the `requestId` (an `ArchiveActivity` Id, `8qv…` prefix) of a completed, log-producing job, and `reportType` = that activity's `Type`.
 
 Preconditions (confirm or surface to the user if a call returns a not-permitted error):
-- The **org** must have Salesforce Archive enabled (the `TrustedServicesArchive` / `TrustedServicesArchiveBt` org permission). Every operation is gated on this first.
+- The **org** must have Salesforce Archive enabled. Every operation is gated on this first.
 - Each operation requires a **specific user permission** on top of the org gate — see the Permissions table below. There is no single "archive admin" role; access is per-capability.
 
 ---
 
 ## Permissions
 
-Every operation first requires the org to have Salesforce Archive enabled (`hasTrustedServicesArchive` = `OrgPermissions.TrustedServicesArchive || TrustedServicesArchiveBt`). On top of that org gate, each capability is gated by a distinct **user permission**. A call the user isn't permitted for fails with a "not permitted" error — match the error to the missing permission below.
+Every operation first requires the org to have Salesforce Archive enabled. On top of that org gate, each capability is gated by a distinct **user permission**. A call the user isn't permitted for fails with a "not permitted" error — match the error to the missing permission below.
 
 | Operation | User permission required |
 |-----------|--------------------------|
-| `search-archived-records`, `get-search-archived-records-next-page` | `ViewSearchPage` (Archive Search) — the Connect search endpoint runs the global-search path, gated by Archive Search, **not** `ViewArchivedRecords` |
-| `search-archived-records-with-sharing-rules` (Agentforce) | `ViewArchivedRecords` |
+| `search-archived-records`, `get-search-archived-records-next-page` | `ViewSearchPage` (Archive Search) — **not** `ViewArchivedRecords` |
+| `search-archived-records-with-sharing-rules` | `ViewArchivedRecords` |
 | `unarchive-records` | `UnarchiveSdk` |
 | `forget-archived-records` (RTBF) + `get-rtbf-status` | `Rtbf` |
 | `mask-archived-records` + `get-masking-status` | `Rtbf` (masking shares the same `Rtbf` permission — **not** a separate entitlement) |
 | `run-analyzer`, `get-analyzer-report`, `get-archive-storage-used` | `ArchiveAnalyzer` |
 | `get-execution-details-stream-url`, `get-failed-records-stream-url` | `ViewActivitiesPage` (Archive Activities) |
-
-> Source of truth: the Connect API resource classes in `trusted-services-archive-connect-impl` → `TrustedServicesArchiveSdkImpl` guards → `TrustedServicesArchive.accessChecks.xml`. Note `search-archived-records` routes through `performArchiverGlobalSearch` (gated by `canRunArchiveSearch` = `ViewSearchPage`); the separate Apex-SDK `searchArchivedRecords()` method is gated by `ViewArchivedRecords`, but the **Connect API** search endpoint does not use it.
 
 ---
 
@@ -57,7 +55,24 @@ All steps are sequential within a task. Read the referenced file the first time 
 
 2. **For job status / monitoring, read the data model** — when the task involves archive jobs, failures, progress, counts, or logs, load `references/archive-activity-entity.md` for the `ArchiveActivity` field reference and how it links to the Connect API. Query `ArchiveActivity` via SOQL or Connect — **not** Flow. For a worked end-to-end example (find failed/in-progress jobs, then pull their execution-detail and failed-records logs), load `examples/monitor-failed-jobs.md`.
 
-3. **Construct and send the call** — follow the contract exactly. For searches, supply `sobjectName` + ≥1 filter; for date filtering use the plural `dateRanges` array of `{field, from, to}` with full ISO-8601 datetimes.
+3. **Construct and send the call** — every operation is a `{method, path, body}` REST call. Send it with whatever Connect/REST API tool your environment provides (an MCP server that invokes Connect/REST APIs, the `sf` CLI, or any REST client). Two path rules are critical (full per-operation contracts are in `references/connect-api-operations.md`):
+
+   - **The operation names in this skill are NOT URL paths.** `search-archived-records`, `unarchive-records`, etc. are labels; never put them in the path. Use the short literal paths below (each relative to base `/platform/data-resilience/archive`). Sending the operation name as a path segment (e.g. `/…/archive/search-archived-records`) returns **404**.
+   - **The path stops at `/platform/data-resilience/archive/…` — there is NO `/connect` segment**, even though this is a Connect API. A **404 / `NOT_FOUND` here means the path is wrong, NOT that Archive is disabled** — fix the path before concluding the add-on is missing.
+
+   | Operation | Method + Path | Notes |
+   |-----------|---------------|-------|
+   | search-archived-records | `POST /search` | requires `sobjectName` + ≥1 filter |
+   | search next page | `GET /search/next/{scrollId}` | stop when `scroll_id == "-1"` |
+   | search with sharing rules | `POST /search/with-sharing-rules` | uses `filtersJson` object map |
+   | unarchive-records | `POST /unarchive` | `sobjectName` + filters |
+   | run-analyzer / report | `POST /analyzer/run` · `GET /analyzer/report` | |
+   | forget / RTBF + status | `POST /rtbf` · `GET /rtbf/{requestId}` | |
+   | mask + status | `POST /mask` · `GET /mask/{requestId}` | |
+   | storage used | `GET /storage/archive-used` | |
+   | execution-detail / failed-records log | `GET /log/execution-details-stream-url` · `GET /log/failed-records-stream-url` | query params `requestId`, `reportType` |
+
+   With the `sf` CLI, prefix the path with `/services/data/v67.0`; some MCP/REST tools take the bare path and add the version themselves (tool-dependent — see the reference). Then follow the contract: for searches, supply `sobjectName` + ≥1 filter; for date filtering use the plural `dateRanges` array of `{field, from, to}` with full ISO-8601 datetimes.
 
 4. **Branch on the right signal** — some operations return HTTP 201 with a body-level success flag (`body.statusCode`, `body.isSuccess`). Read `references/connect-api-operations.md` for which signal to trust per operation; never assume the HTTP status alone means success.
 
@@ -80,12 +95,11 @@ All steps are sequential within a task. Read the referenced file the first time 
 
 | Constraint | Rationale |
 |-----------|-----------|
-| Search & unarchive require `sobjectName` + at least one filter | The controller rejects an unfiltered request with "Search must be based on at least 1 field" — a full-object operation is never allowed. |
+| Search & unarchive require `sobjectName` + at least one filter | An unfiltered request is rejected with "Search must be based on at least 1 field" — a full-object operation is never allowed. |
 | Date filters must be full ISO-8601 datetimes (`2020-01-01T00:00:00Z`) | A date-only value (`2020-01-01`) returns `400 JSON_PARSER_ERROR` because the field is typed `xsd:dateTime`. |
 | Search uses `dateRanges` (plural array); unarchive uses `dateRange` (singular) | They are genuinely different fields on the two endpoints; using the wrong shape silently drops the filter or 400s. |
 | Stop pagination when `scroll_id == "-1"` | Calling `get-search-archived-records-next-page` with `"-1"` returns 500. |
 | Log downloads need a real `ArchiveActivity` Id as `requestId` + that activity's `Type` as `reportType` | The backend resolves the log by the activity record; a mismatched `reportType` returns no log. |
-| Never use the deprecated lookups | `global-search-by-id`, `get-global-search-results`, and `view-archived-records` are deprecated with no successor and currently 500. Use `search-archived-records` (+ next-page) instead. |
 | Excluded objects are not retrievable | `Feed`, `History`, `Relation`, `Share` are not searchable; Files/Attachments are not retrievable via this API — do not promise them. |
 | Query `ArchiveActivity` via SOQL/Connect, never Flow | `ArchiveActivity` has `isProcessEnabled=false`, so a Flow "Get Records" element on it fails with "You can't get ArchiveActivity records in a flow." |
 
@@ -97,7 +111,7 @@ All steps are sequential within a task. Read the referenced file the first time 
 |-------|------------|
 | Treating HTTP 201 as success | Several operations return 201 with a body-level outcome. Branch on `body.statusCode` (search) or `body.isSuccess` (`with-sharing-rules`), not the HTTP code. |
 | `run-analyzer.isRunning` used as a signal | It is **always** `null`; the endpoint only populates `message`. Poll `get-analyzer-report` to confirm completion instead. |
-| `search-archived-records-with-sharing-rules` (Agentforce) filters as an array | `filtersJson` must be a JSON-encoded **object map** `{"Field":"Value"}`, not an array of `{field,value}`; the array form returns `isSuccess:false "No valid filters provided"`. |
+| `search-archived-records-with-sharing-rules` filters as an array | `filtersJson` must be a JSON-encoded **object map** `{"Field":"Value"}`, not an array of `{field,value}`; the array form returns `isSuccess:false "No valid filters provided"`. |
 | Log `url` treated as present because status is 201 | `get-*-stream-url` returns `{url}`; `url: null` means no log was resolved. Always check `url != null`. |
 | Misreading `get-archive-storage-used` | `usedStorage[]`/`availableStorage[]` are parallel positional arrays: index 0=org DATA, 1=org FILE, 2=archive RECORDS, 3=archive FILE. `availableStorage[2]`/`[3]` are **always 0** (archive tier is unmetered) — that means "not tracked", not "full". |
 | Expecting `ArchiveActivity` in a Flow | It is not Flow-enabled (`isProcessEnabled=false`). Use SOQL/Connect/Reports. |

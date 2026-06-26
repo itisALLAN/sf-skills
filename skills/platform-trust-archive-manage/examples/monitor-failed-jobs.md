@@ -23,13 +23,13 @@ Read each row's `ProgressPercentage`, `SucceededCount`/`FailedCount`, `RootEntit
 Take the job's `Id` (`8qv…`) as `requestId` and its `Type` as `reportType`. `{activity.Type}` below is a placeholder for that job's own `Type` field value (e.g. `Archive`, `Purge`, `Unarchive`, `Analyzer`) — substitute the actual value per job; a hardcoded/mismatched `reportType` returns no log.
 
 **Execution-detail log:**
-```
+```text
 GET /platform/data-resilience/archive/log/execution-details-stream-url
     ?requestId={activity.Id}&reportType={activity.Type}
 ```
 
 **Failed-records log:**
-```
+```text
 GET /platform/data-resilience/archive/log/failed-records-stream-url
     ?requestId={activity.Id}&reportType={activity.Type}
 ```

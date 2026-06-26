@@ -1,638 +1,393 @@
 ---
 name: experience-ui-bundle-salesforce-data-access
-description: "MUST activate when the project contains a uiBundles/*/src/ directory and the task involves ANY Salesforce record operation — reading, creating, updating, or deleting. Use this skill when building forms that submit to Salesforce, pages that display Salesforce records, or any code that touches Salesforce objects or custom objects. Activate when files under uiBundles/*/src/ import from @salesforce/sdk-data, or when *.graphql files or codegen.yml exist. This skill owns all Salesforce data access patterns in UI bundles. Does not apply to authentication/OAuth setup, schema changes, Bulk/Tooling/Metadata API, or declarative automation."
+description: "MUST activate when a uiBundles/*/src/ project does ANY Salesforce record operation — reading, creating, updating, deleting, or caching/refreshing query results. Triggers: code importing @salesforce/platform-sdk, calls to sdk.graphql.query / sdk.graphql.mutate / sdk.fetch, *.graphql files, stale data needing a force-refresh, or wiring up a UI bundle's data layer to read, write, or refresh Salesforce records. The default for new read/write work is the Read/Write workflow with the current @salesforce/platform-sdk API; only follow the migration path when EXISTING code already uses the old @salesforce/sdk-data callable form. Not for building app shell/UI, styling, file upload, or auth/search scaffolding — use the other ui-bundle-* skills. DO NOT TRIGGER when: OAuth setup, schema changes, Bulk/Tooling/Metadata API, or declarative automation."
 metadata:
-  version: "1.0"
+  version: "2.1"
 ---
 
-# Salesforce Data Access
+# Salesforce Data Access (UI bundles)
 
-## Data SDK Requirement
+All Salesforce data access in a UI bundle goes through the **`@salesforce/platform-sdk`**
+data SDK. The SDK handles auth, CSRF, and base-URL resolution, and — on the WebApp
+surface — caches every GraphQL query by default.
 
-> **All Salesforce data access MUST use the Data SDK** (`@salesforce/sdk-data`). The SDK handles authentication, CSRF, and base URL resolution.
+This file is the **workflow + guardrail spine**. Depth lives in linked docs:
+
+- **[references/graphiti-cli.md](references/graphiti-cli.md)** — the **`graphiti` CLI** (`sf-gql-*`
+  commands) that compiles a small JSON spec into a schema-correct, guardrail-applied query +
+  variables + types. The preferred way to author the GraphQL in steps below; falls back to the
+  schema-grep script when unavailable.
+- **[references/sdk-api.md](references/sdk-api.md)** — the new call API: `query`/`mutate`,
+  `QueryResult`, typing, error-handling stances.
+- **[references/caching.md](references/caching.md)** — on-by-default cache + the **two refresh
+  modes** (`result.refresh`/`subscribe` vs per-call `cacheControl`).
+- **[references/graphql-hand-authoring.md](references/graphql-hand-authoring.md)** — schema lookup, read /
+  mutation templates, every platform guardrail (`@optional`, pagination, limits,
+  semi-join, wrappers, error table…).
+- **[references/rest-and-integration.md](references/rest-and-integration.md)** — `sdk.fetch`,
+  the supported-API allowlist, and the reactive/lifecycle integration patterns.
+- **[references/migration.md](references/migration.md)** — old `@salesforce/sdk-data` callable code
+  → new namespace. The **only** place the dead API appears as usable code.
+
+## The one-paragraph mental model
+
+`const sdk = await createDataSDK()`. Then `sdk.graphql` is a **namespace**, not a
+function: **`sdk.graphql!.query({...})`** for reads, **`sdk.graphql!.mutate({...})`**
+for writes. On WebApp, **every `query()` is cached by default** (300s). HTTP 200 never
+means success — always check `result.errors`. Verify every entity and field against the
+schema before you query it: one unverified field fails the *whole* query at runtime, and
+`schema.graphql` is too large to eyeball — look it up.
 
 ```typescript
-import { createDataSDK, gql } from "@salesforce/sdk-data";
-import type { ResponseTypeQuery } from "../graphql-operations-types";
+import { createDataSDK, gql } from "@salesforce/platform-sdk"; // gql tags the query string so codegen + eslint validate it
 
 const sdk = await createDataSDK();
-
-// GraphQL for record queries/mutations (PREFERRED)
-const response = await sdk.graphql?.<ResponseTypeQuery>(query, variables);
-
-// REST for Connect REST, Apex REST, UI API (when GraphQL insufficient)
-const res = await sdk.fetch?.("/services/apexrest/my-resource");
+const result = await sdk.graphql!.query({ query: GET_ACCOUNTS, variables });
+if (result.errors?.length) throw new Error(result.errors.map((e) => e.message).join("; "));
+const rows = result.data?.uiapi?.query?.Account?.edges?.map((e) => e.node) ?? []; // unwrap edges/node; read field values via .value
 ```
 
-**Always use optional chaining** (`sdk.graphql?.()`, `sdk.fetch?.()`) — these methods may be undefined in some surfaces.
+Typed call params (`query<GetAccountsQuery, GetAccountsQueryVariables>`), the `CacheControl`
+type, and `NodeOfConnection<T>` (extracts a node type from a Connection for clean typing) all
+live in [references/sdk-api.md](references/sdk-api.md).
 
-## Preconditions — verify before starting
-
-| # | Requirement | How to verify | If missing |
-|---|-------------|---------------|------------|
-| 1 | `@salesforce/sdk-data` installed | Check `package.json` in the UI bundle dir | Cannot proceed — tell user to install it |
-| 2 | `schema.graphql` at project root | Check if file exists | Run `npm run graphql:schema` from UI bundle dir |
-| 3 | Custom objects/fields deployed | Run `graphql-search.sh <Entity>` — no output means not deployed | Ask user to deploy metadata and assign permission sets |
-
-**If preconditions are not met**, you may scaffold components, routes, layout, and UI logic, but use empty arrays / `null` for data and mark query locations with `// TODO: add query after schema verification` and include in the plan to go back, resolve requirements and write the GraphQL. Do not write GraphQL query strings until the schema workflow is complete.
-
-## Supported APIs
-
-**Only the following APIs are permitted.** Any endpoint not listed here must not be used.
-
-| API | Method | Endpoints / Use Case |
-|-----|--------|----------------------|
-| GraphQL | `sdk.graphql` | All record queries and mutations via `uiapi { }` namespace |
-| UI API REST | `sdk.fetch` | `/services/data/v{ver}/ui-api/records/{id}` — record metadata when GraphQL is insufficient |
-| Apex REST | `sdk.fetch` | `/services/apexrest/{resource}` — custom server-side logic, aggregates, multi-step transactions |
-| Connect REST | `sdk.fetch` | `/services/data/v{ver}/connect/file/upload/config` — file upload config |
-| Einstein LLM | `sdk.fetch` | `/services/data/v{ver}/einstein/llm/prompt/generations` — AI text generation |
-
-**Not supported:**
-
-- **Enterprise REST query endpoint** (`/services/data/v*/query` with SOQL) — blocked at the proxy level. Use GraphQL for record reads; use Apex REST if server-side SOQL aggregates are required.
-- **Aura-enabled Apex** (`@AuraEnabled`) — an LWC/Aura pattern with no invocation path from React UI bundles.
-- **Chatter API** (`/chatter/users/me`) — use `uiapi { currentUser { ... } }` in a GraphQL query instead.
-- **Any other Salesforce REST endpoint** not listed in the supported table above.
-
-## Decision: GraphQL vs REST
-
-| Need | Method | Example |
-|------|--------|---------|
-| Query/mutate records | `sdk.graphql` | Account, Contact, custom objects |
-| Current user info | `sdk.graphql` | `uiapi { currentUser { Id Name { value } } }` |
-| UI API record metadata | `sdk.fetch` | `/ui-api/records/{id}` |
-| Connect REST | `sdk.fetch` | `/connect/file/upload/config` |
-| Apex REST | `sdk.fetch` | `/services/apexrest/auth/login` |
-| Einstein LLM | `sdk.fetch` | `/einstein/llm/prompt/generations` |
-
-**GraphQL is preferred** for record operations. Use REST only when GraphQL doesn't cover the use case.
+> **This changed (breaking — PR #502).** The previous callable `sdk.graphql(...)` form and the
+> previous package name are **dead** — the code above is the only correct form. If you encounter
+> the old API in existing code (or a stale `dist/` artifact), don't copy it; convert it per
+> [Working on existing code](#working-on-existing-code-migration).
+>
+> **`sdk.graphql!` is WebApp-only.** The non-null assertion above is correct *only* if the
+> bundle runs solely on WebApp. On other surfaces it can crash — decide before you write it.
+> See **[Surfaces — `!` vs guard](#surfaces--sdkgraphql-vs-guard)** below.
 
 ---
 
-## GraphQL Non-Negotiable Rules
+## Surfaces — `sdk.graphql!` vs guard
 
-These rules exist because Salesforce GraphQL has platform-specific behaviors that differ from standard GraphQL. Violations cause silent runtime failures.
+`createDataSDK()` runs on multiple surfaces, and **`sdk.graphql` / `sdk.fetch` are genuinely
+optional** (typed `graphql?: …`). Whether you may assert them with `!` depends entirely on
+where the bundle runs — this is the one surface decision that turns into a *runtime crash* if
+you get it wrong, so make it explicitly before writing any `query`/`mutate` call:
 
-1. **HTTP 200 does not mean success** — Salesforce returns HTTP 200 even when operations fail. **Always parse the `errors` array in the response body.**
+| Surface(s) | `sdk.graphql` | Write |
+|---|---|---|
+| **WebApp only** | always present | `sdk.graphql!.query({...})` — `!` is safe; every shipped WebApp consumer uses it |
+| **Mosaic / OpenAI / MCPApps** (or any bundle that *might* run off-WebApp) | can be `undefined` | **guard first** (`if (!sdk.graphql) return …`), then call |
 
-2. **Schema is the single source of truth** — Every entity name, field name, and type must be confirmed via the schema search script before use in a query. Never guess — Salesforce field names are case-sensitive, relationships may be polymorphic, and custom objects use suffixes (`__c`, `__e`). Objects added to UI API in v60+ may use a `_Record` suffix (e.g., `FeedItem_Record` instead of `FeedItem`).
-
-3. **`@optional` on all record fields** (read queries) — Salesforce field-level security (FLS) causes queries to fail entirely if the user lacks access to even one field. The `@optional` directive (v65+) tells the server to omit inaccessible fields instead of failing. Apply it to every scalar field, parent relationship, and child relationship. Consuming code must use optional chaining (`?.`) and nullish coalescing (`??`).
-
-4. **Correct mutation syntax** — Mutations wrap under `uiapi(input: { allOrNone: true/false })`, not bare `uiapi { ... }`. Always set `allOrNone` explicitly. Output fields cannot include child relationships or navigated reference fields.
-
-5. **Explicit pagination** — Always include `first:` in every query. If omitted, the server silently defaults to 10 records. Include `pageInfo { hasNextPage endCursor }` for any query that may need pagination. Forward-only (`first`/`after`) — `last`/`before` are unsupported.
-
-6. **SOQL-derived execution limits** — Max 10 subqueries per request, max 5 levels of child-to-parent traversal, max 1 level of parent-to-child (no grandchildren), max 2,000 records per subquery. If a query would exceed these, split into multiple requests.
-
-7. **Only requested fields** — Only generate fields the user explicitly asked for. Do NOT add extra fields.
-
-8. **Compound fields** — When filtering or ordering, use constituent fields (e.g., `BillingCity`, `BillingCountry`), not the compound wrapper (`BillingAddress`). The compound wrapper is only for selection.
+Rule of thumb: **if you cannot prove the bundle is WebApp-only, guard.** A bare `sdk.graphql!`
+that later ships to another surface throws `Cannot read properties of undefined` at runtime —
+TypeScript won't catch it because `!` silences exactly that check (same applies to `sdk.fetch!`).
+The portable guard snippet lives in [references/sdk-api.md](references/sdk-api.md#sdkgraphql-vs-guard).
 
 ---
 
-## GraphQL Workflow
+## Step 0 — Route the task
 
-| Step | Action | Key output |
-|------|--------|------------|
-| 1 | Acquire schema | `schema.graphql` exists |
-| 2 | Look up entities | Field names, types, relationships confirmed |
-| 3 | Generate query | `.graphql` file or inline `gql` tag |
-| 4 | Generate types | `graphql-operations-types.ts` |
-| 5 | Validate | Lint + codegen pass |
+| The task is… | Go to |
+|---|---|
+| Read records | **[Read workflow](#read-workflow)** below |
+| Create / update / delete records | **[Write workflow](#write-workflow)** below |
+| Object/field metadata, picklist values, related-list metadata, aggregations | **[Beyond record CRUD](#beyond-record-crud)** below |
+| Data is stale / "add a refresh button" / "cache it longer" | **[Freshness & caching](#freshness--caching)** below |
+| Something GraphQL can't express (Apex REST, file upload, Einstein) | [references/rest-and-integration.md](references/rest-and-integration.md) |
+| Migrating old `sdk.graphql?.(query, vars)` code | **[Working on existing code](#working-on-existing-code-migration)** below |
 
-### Step 1: Acquire Schema
+GraphQL covers far more than record reads and writes — prefer it for **anything the `uiapi`
+namespace exposes** (see [Beyond record CRUD](#beyond-record-crud)). Reach for REST only when
+the data genuinely lives outside `uiapi` (Apex REST, file upload, Einstein) — see
+[references/rest-and-integration.md](references/rest-and-integration.md).
 
-The `schema.graphql` file (265K+ lines) is the source of truth. **Never open or parse it directly** — no cat, less, head, tail, editors, or programmatic parsers.
+---
 
-Verify preconditions 1–3 (see [Preconditions](#preconditions--verify-before-starting)), then proceed to Step 2.
+## Preconditions — verify before writing any query
 
-### Step 2: Look Up Entity Schema
+`<skill-dir>` below is wherever this skill is installed (the directory this
+`SKILL.md` loaded from). The schema-lookup script ships inside it. The script does
+**not** hunt for `schema.graphql` by walking up the tree — an ancestor schema can
+belong to a different org and would validate fields against the wrong one. Resolve
+the schema explicitly: run from the SFDX project root (where `schema.graphql` lives),
+or pass `--schema <path>` / set `GRAPHQL_SCHEMA=<path>`. The script echoes the schema
+it resolved (`[graphql-search] using schema: …` on stderr) — glance at it to confirm
+you grounded against the right file.
 
-Map user intent to PascalCase names ("accounts" → `Account`), then **run the search script from the `sfdx-project` folder (project root)**:
-
-```bash
-bash scripts/graphql-search.sh Account
-# Multiple entities:
-bash scripts/graphql-search.sh Account Contact Opportunity
-```
-
-The script outputs seven sections per entity:
-1. **Type definition** — all queryable fields and relationships
-2. **Filter options** — available fields for `where:` conditions
-3. **Sort options** — available fields for `orderBy:`
-4. **Create mutation wrapper** — `<Entity>CreateInput`
-5. **Create mutation fields** — `<Entity>CreateRepresentation` (fields accepted by create mutations)
-6. **Update mutation wrapper** — `<Entity>UpdateInput`
-7. **Update mutation fields** — `<Entity>UpdateRepresentation` (fields accepted by update mutations)
-
-**Maximum 2 script runs.** If the entity still can't be found, ask the user — the object may not be deployed.
-
-#### Entity Identification
-
-If a candidate does not match:
-- Try `__c` suffix for custom objects, `__e` for platform events
-- Try `_Record` suffix — objects added in v60+ may use `<EntityName>_Record`
-- If still unresolved, **ask the user** — do not guess
-
-#### Iterative Introspection (max 3 cycles)
-
-1. **Introspect** — Run the script for each unresolved entity
-2. **Fields** — Extract requested field names and types from the type definition
-3. **References** — Identify reference fields. If polymorphic (multiple types), use inline fragments. Add newly discovered entity types to the working list.
-4. **Child relationships** — Identify Connection types. Add child entity types to the working list.
-5. **Repeat** if unresolved entities remain (max 3 cycles)
-
-**Hard stops:** If no data returned for an entity, stop — it may not be deployed. If unknown entities remain after 3 cycles, ask the user. Do not generate queries with unconfirmed entities or fields.
-
-### Step 3: Generate Query
-
-Every field name **must** be verified from the script output in Step 2.
-
-#### Read Query Template
-
-```graphql
-query QueryName($after: String) {
-  uiapi {
-    query {
-      EntityName(
-        first: 10
-        after: $after
-        where: { ... }
-        orderBy: { ... }
-      ) {
-        edges {
-          node {
-            Id
-            FieldName @optional { value }
-            # Parent relationship (non-polymorphic)
-            Owner @optional { Name { value } }
-            # Parent relationship (polymorphic — use fragments)
-            What @optional {
-              ...WhatAccount
-              ...WhatOpportunity
-            }
-            # Child relationship — max 1 level, no grandchildren
-            Contacts @optional(first: 10) {
-              edges { node { Name @optional { value } } }
-            }
-          }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-
-fragment WhatAccount on Account {
-  Id
-  Name @optional { value }
-}
-fragment WhatOpportunity on Opportunity {
-  Id
-  Name @optional { value }
-}
-```
-
-**Consuming code must defend against missing fields:**
-
-```typescript
-const name = node.Name?.value ?? "";
-const relatedName = node.Owner?.Name?.value ?? "N/A";
-```
-
-#### Filtering
-
-```graphql
-# Implicit AND
-Account(where: { Industry: { eq: "Technology" }, AnnualRevenue: { gt: 1000000 } })
-
-# Explicit OR
-Account(where: { OR: [{ Industry: { eq: "Technology" } }, { Industry: { eq: "Finance" } }] })
-
-# NOT
-Account(where: { NOT: { Industry: { eq: "Technology" } } })
-
-# Date literal
-Opportunity(where: { CloseDate: { eq: { value: "2024-12-31" } } })
-
-# Relative date
-Opportunity(where: { CloseDate: { gte: { literal: TODAY } } })
-
-# Relationship filter (nested objects, NOT dot notation)
-Contact(where: { Account: { Name: { like: "Acme%" } } })
-
-# Polymorphic relationship filter
-Account(where: { Owner: { User: { Username: { like: "admin%" } } } })
-```
-
-String equality (`eq`) is case-insensitive. Both 15-char and 18-char record IDs are accepted.
-
-#### Ordering
-
-```graphql
-Account(
-  first: 10,
-  orderBy: { Name: { order: ASC }, CreatedDate: { order: DESC } }
-) { ... }
-```
-
-Unsupported for ordering: multi-select picklist, rich text, long text area, encrypted fields. Add `Id` as tie-breaker for deterministic ordering.
-
-#### UpperBound Pagination (v59+)
-
-For >200 records per page or >4,000 total records, use `upperBound`. `first` must be 200–2000 when set.
-
-```graphql
-Account(first: 2000, after: $cursor, upperBound: 10000) {
-  edges { node { Id Name @optional { value } } }
-  pageInfo { hasNextPage endCursor }
-}
-```
-
-#### Semi-Join and Anti-Join
-
-Filter a parent entity by conditions on child entities using `inq` (semi-join) or `ninq` (anti-join) on the parent's `Id`. If the only condition is child existence, use `Id: { ne: null }`.
-
-```graphql
-query SemiJoinExample {
-  uiapi {
-    query {
-      Account(where: {
-        Id: {
-          inq: {
-            Contact: { LastName: { like: "Smith%" } }
-            ApiName: "AccountId"
-          }
-        }
-      }, first: 10) {
-        edges { node { Id Name @optional { value } } }
-      }
-    }
-  }
-}
-```
-
-Replace `inq` with `ninq` for anti-join. Restrictions: no `OR` in subquery, no `orderBy` in subquery, no nesting joins within each other.
-
-#### Current User
-
-Use `uiapi.currentUser` (no arguments) instead of the standard query pattern:
-
-```graphql
-query CurrentUser {
-  uiapi { currentUser { Id Name { value } } }
-}
-```
-
-#### Field Value Wrappers
-
-Schema fields use typed wrappers — access via `.value`:
-
-| Wrapper Type | Underlying | Wrapper Type | Underlying |
+| # | Requirement | Verify | If missing |
 |---|---|---|---|
-| `StringValue` | `String` | `BooleanValue` | `Boolean` |
-| `IntValue` | `Int` | `DoubleValue` | `Double` |
-| `CurrencyValue` | `Currency` | `PercentValue` | `Percent` |
-| `DateTimeValue` | `DateTime` | `DateValue` | `Date` |
-| `PicklistValue` | `Picklist` | `LongValue` | `Long` |
-| `IDValue` | `ID` | `TextAreaValue` | `TextArea` |
-| `EmailValue` | `Email` | `PhoneNumberValue` | `PhoneNumber` |
-| `UrlValue` | `Url` | | |
+| 1 | `@salesforce/platform-sdk` installed | `package.json` in the UI bundle dir | Tell user to install it; cannot proceed |
+| 2 | A grounding tool resolves | **Preferred:** `npx graphiti sf-gql-discover '{"org":"<alias>","mode":"list_objects"}'` from the UI bundle dir returns objects. **Fallback:** `bash <skill-dir>/scripts/graphql-search.sh <Entity>` from the project root prints a lookup, not "schema.graphql not found" | No graphiti dep / org won't prime → use the script. Script can't find `schema.graphql` → pass `--schema <path>`, or `npm run graphql:schema` from the UI bundle dir. ([references/graphiti-cli.md](references/graphiti-cli.md) covers CLI setup) |
+| 3 | Target objects/fields deployed | The object appears in `sf-gql-discover` (or `graphql-search.sh <Entity>` returns output) | Entity absent usually means it isn't deployed (or the cache/schema is stale). Refresh: `npx graphiti sf-gql-connect '{"org":"<alias>","forceRefresh":true}'` (CLI) or `npm run graphql:schema` (script). If still absent, deploy the metadata (the **platform-metadata-deploy** skill handles this) and assign the permission sets, then re-check |
 
-All wrappers also expose `displayValue: String` (server-rendered via `toLabel()`/`format()`) — use for UI display instead of formatting client-side.
-
-#### Mutation Template
-
-Mutations are GA in API v66+. Three operations: **Create**, **Update**, **Delete**.
-
-```graphql
-# Create
-mutation CreateAccount($input: AccountCreateInput!) {
-  uiapi(input: { allOrNone: true }) {
-    AccountCreate(input: $input) {
-      Record { Id Name { value } }
-    }
-  }
-}
-
-# Update — must include Id
-mutation UpdateAccount {
-  uiapi(input: { allOrNone: true }) {
-    AccountUpdate(input: { Id: "001xx000003GYkZAAW", Account: { Name: "New Name" } }) {
-      Record { Id Name { value } }
-    }
-  }
-}
-```
-
-**Input constraints:**
-- **Create**: Required fields (unless `defaultedOnCreate`), only `createable` fields, no child relationships. Reference fields set by `ApiName` (e.g., `AccountId`).
-- **Update**: Must include `Id`, only `updateable` fields, no child relationships.
-- **Delete**: `Id` only.
-- **`IdOrRef` type**: The `Id` field in Update and Delete inputs uses the `IdOrRef` type, which accepts either a literal record ID (e.g., `"001xx..."`) or a mutation chaining reference (`"@{Alias}"`). Reference fields in Create inputs (e.g., `AccountId`) also accept `@{Alias}` for chaining.
-- **Raw values**: No commas, currency symbols, or locale formatting (e.g., `80000` not `"$80,000"`).
-
-**Output constraints:**
-- Create/Update: Exclude child relationships, exclude navigated reference fields (only `ApiName` member allowed). Output field is always named `Record`.
-- Delete: `Id` only.
-
-**`allOrNone` semantics:**
-- `true` (default) — All operations succeed or all roll back.
-- `false` — Independent operations succeed individually, but dependent operations (using `@{alias}`) still roll back together.
-
-#### Mutation Chaining
-
-Chain related mutations using `@{alias}` references to `Id` from earlier mutations. Required for parent-child creation (nested child creates are not supported).
-
-```graphql
-mutation CreateAccountAndContact {
-  uiapi(input: { allOrNone: true }) {
-    AccountCreate(input: { Account: { Name: "Acme" } }) {
-      Record { Id }
-    }
-    ContactCreate(input: { Contact: { LastName: "Smith", AccountId: "@{AccountCreate}" } }) {
-      Record { Id }
-    }
-  }
-}
-```
-
-Rules: `A` must come before `B` in the query. `@{A}` is always the `Id` from mutation `A`. Only `Create` or `Delete` can be chained from (not `Update`).
-
-#### Delete Mutation
-
-Delete uses generic `RecordDeleteInput` (not entity-specific). Output is `Id` only — no `Record` field.
-
-```graphql
-mutation DeleteAccount($id: ID!) {
-  uiapi(input: { allOrNone: true }) {
-    AccountDelete(input: { Id: $id }) {
-      Id
-    }
-  }
-}
-```
-
-#### Object Metadata & Picklist Values
-
-Use `uiapi { objectInfos(...) }` to fetch field metadata or picklist values. Pass **either** `apiNames` or `objectInfoInputs` — never both.
-
-```typescript
-// Object metadata
-const GET_OBJECT_INFO = gql`
-  query GetObjectInfo($apiNames: [String!]!) {
-    uiapi {
-      objectInfos(apiNames: $apiNames) {
-        ApiName
-        label
-        labelPlural
-        fields { ApiName label dataType updateable createable }
-      }
-    }
-  }
-`;
-
-// Picklist values (use objectInfoInputs + inline fragment)
-const GET_PICKLIST_VALUES = gql`
-  query GetPicklistValues($objectInfoInputs: [ObjectInfoInput!]!) {
-    uiapi {
-      objectInfos(objectInfoInputs: $objectInfoInputs) {
-        ApiName
-        fields {
-          ApiName
-          ... on PicklistField {
-            picklistValuesByRecordTypeIDs {
-              recordTypeID
-              picklistValues { label value }
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-```
-
-### Step 4: Generate Types (codegen)
-
-After writing the query (whether in a `.graphql` file or inline with `gql`), generate TypeScript types:
-
-```bash
-# Run from UI bundle dir
-npm run graphql:codegen
-```
-
-Output: `src/api/graphql-operations-types.ts`
-
-Generated type naming conventions:
-- `<OperationName>Query` / `<OperationName>Mutation` — response types
-- `<OperationName>QueryVariables` / `<OperationName>MutationVariables` — variable types
-
-**Always import and use the generated types** when calling `sdk.graphql`:
-
-```typescript
-import type { GetAccountsQuery, GetAccountsQueryVariables } from "../graphql-operations-types";
-
-const response = await sdk.graphql?.<GetAccountsQuery, GetAccountsQueryVariables>(GET_ACCOUNTS, variables);
-```
-
-Use `NodeOfConnection<T>` to extract the node type from a Connection for cleaner typing:
-
-```typescript
-import { type NodeOfConnection } from "@salesforce/sdk-data";
-
-type AccountNode = NodeOfConnection<GetAccountsQuery["uiapi"]["query"]["Account"]>;
-```
-
-### Step 5: Validate & Test
-
-1. **Lint**: `npx eslint <file>` from UI bundle dir
-2. **codegen**: `npm run graphql:codegen` from UI bundle dir
-
-#### Common Error patterns
-
-| Error Contains | Resolution |
-|----------------|------------|
-| `Cannot query field` / `ValidationError` | Field name wrong — re-run `graphql-search.sh <Entity>` |
-| `Unknown type` | Type name wrong — verify PascalCase entity name via script |
-| `Unknown argument` | Argument wrong — check Filter/OrderBy sections in script output |
-| `invalid syntax` / `InvalidSyntax` | Fix syntax per error message |
-| `VariableTypeMismatch` / `UnknownType` | Correct argument type from schema |
-| `invalid cross reference id` | Entity deleted — ask for valid Id |
-| `OperationNotSupported` | Check object availability and API version |
-| `is not currently available in mutation results` | Remove field from mutation output |
-| `Cannot invoke JsonElement.isJsonObject()` | Use API version 64+ for update mutation `Record` selection |
-
-**On PARTIAL** If a mutation returns both data and errors (partial success): Report inaccessible fields, explain they cannot be in mutation output, offer to remove them. **Wait for user consent** before changing.
+If preconditions aren't met you may still scaffold components, routes, and layout — but
+use empty arrays / `null` for data, mark query sites with
+`// TODO: add query after schema verification`, and add a plan item to return. Do **not**
+write GraphQL strings until the schema workflow is complete.
 
 ---
 
-## UI Bundle Integration (React)
+## Read workflow
 
-Two integration patterns:
+1. **Look up the schema first — never guess a name.** **Preferred (graphiti):** when the exact
+   API name is at all uncertain, **list before you describe** —
+   `npx graphiti sf-gql-discover '{"org":"<alias>","mode":"list_objects","search":"<intent>"}'`
+   to find the real name, then
+   `npx graphiti sf-gql-discover '{"org":"<alias>","mode":"describe_object","object":"<Entity>"}'`
+   for exact field/type names, picklist values, filterable/sortable. An empty list or missing object
+   is a **fact about the org** (wrong name or not deployed), **not a tool failure** — re-list or
+   `forceRefresh`; **do not fall back to the script for this** (see guardrail 2). **Fallback** is
+   only for a CLI that genuinely can't run (no graphiti dep / org won't prime):
+   `bash <skill-dir>/scripts/graphql-search.sh <Entity>` from the SFDX project root.
+   (Full rules: [references/graphql-hand-authoring.md](references/graphql-hand-authoring.md).)
+2. **Write the query.** **Preferred — compile it with graphiti:**
+   `npx graphiti sf-gql-list '{"org":"<alias>","object":"<Entity>","fields":[…],"first":N}'`
+   returns a `{ query, variables, types, warnings }` envelope with `@optional`, `value`/`displayValue`,
+   `edges/node`, and `first:`/`pageInfo` **already applied**. Confirm `warnings: []` (a non-empty
+   array means the object wasn't in the primed schema — the query is degraded; don't ship it), then
+   paste the `query` verbatim into inline `gql` (simple) or an external `.graphql` file (one operation
+   per file, imported with the bundler's `?raw` suffix — `import Q from "./q.graphql?raw"` brings the
+   file in as a plain string). **Fallback — hand-author:** apply `@optional` to every **selectable
+   FLS-gated field** — scalar leaf fields (`Name @optional { value }`) and parent/child
+   relationships *and* the fields inside them — but **NOT** on `Id`, on connection plumbing
+   (`edges`, `node`, the connection field itself), or on `pageInfo`; the graphiti output leaves
+   those bare and is the canonical placement. Always set `first:`, include `pageInfo` if it may
+   page. Either way, full mechanics and the primed-vs-degraded behavior:
+   [references/graphiti-cli.md](references/graphiti-cli.md).
+3. **Generate types** — `npm run graphql:codegen` (from the UI bundle dir) →
+   `src/api/graphql-operations-types.ts`.
+4. **Call `query()`** with the generated types:
 
-### Pattern 1 — External `.graphql` file (complex queries)
+   ```typescript
+   import type { GetAccountsQuery, GetAccountsQueryVariables } from "../graphql-operations-types";
 
-**One operation per `.graphql` file.** Each file contains exactly one `query` or `mutation` (plus its fragments). Do not combine multiple operations in a single file.
+   const result = await sdk.graphql!.query<GetAccountsQuery, GetAccountsQueryVariables>({
+     query: GET_ACCOUNTS,
+     variables: { first: 20 },
+     // cacheControl,            // optional — see Freshness & caching
+   });
+   ```
+5. **Handle the result.** `result.data` + `result.errors` are the initial snapshot;
+   `result.subscribe` / `result.refresh` are the reactive handles. Always check
+   `errors` before reading `data`:
 
-```typescript
-import { createDataSDK, type NodeOfConnection } from "@salesforce/sdk-data";
-import MY_QUERY from "./query/myQuery.graphql?raw"; // ?raw suffix required
-import type { GetMyDataQuery, GetMyDataQueryVariables } from "../graphql-operations-types";
+   ```typescript
+   if (result.errors?.length) throw new Error(result.errors.map((e) => e.message).join("; "));
+   const rows = result.data?.uiapi?.query?.Account?.edges?.map((e) => e.node) ?? [];
+   ```
 
-const sdk = await createDataSDK();
-const response = await sdk.graphql?.<GetMyDataQuery, GetMyDataQueryVariables>(MY_QUERY, variables);
-```
-
-After creating/changing `.graphql` files, run `npm run graphql:codegen` to generate types into `src/api/graphql-operations-types.ts`.
-
-### Pattern 2 — Inline `gql` tag (simple queries)
-
-**Must use `gql`** — plain template strings bypass ESLint schema validation.
-
-```typescript
-import { createDataSDK, gql } from "@salesforce/sdk-data";
-import type { GetAccountsQuery } from "../graphql-operations-types";
-
-const GET_ACCOUNTS = gql`
-  query GetAccounts {
-    uiapi {
-      query {
-        Account(first: 10) {
-          edges { node { Id Name @optional { value } } }
-        }
-      }
-    }
-  }
-`;
-
-const sdk = await createDataSDK();
-const response = await sdk.graphql?.<GetAccountsQuery>(GET_ACCOUNTS);
-```
-
-### Error Handling
-
-```typescript
-// Strict (default) — any errors = failure
-if (response?.errors?.length) {
-  throw new Error(response.errors.map(e => e.message).join("; "));
-}
-
-// Tolerant — log errors, use available data
-if (response?.errors?.length) {
-  console.warn("GraphQL partial errors:", response.errors);
-}
-
-// Discriminated — fail only when no data returned
-if (!response?.data && response?.errors?.length) {
-  throw new Error(response.errors.map(e => e.message).join("; "));
-}
-
-const accounts = response?.data?.uiapi?.query?.Account?.edges?.map(e => e.node) ?? [];
-```
+Defend consuming code with `?.`/`??` (because `@optional` can omit fields). Error-handling
+stances (strict / tolerant / discriminated) and `NodeOfConnection` typing: [references/sdk-api.md](references/sdk-api.md).
 
 ---
 
-## REST API Patterns
+## Write workflow
 
-Use `sdk.fetch` when GraphQL is insufficient. See the [Supported APIs](#supported-apis) table for the full allowlist.
+1–3 as above (schema lookup → write the **mutation** → codegen). To compile the mutation with
+graphiti, use `sf-gql-create` / `sf-gql-update` / `sf-gql-delete` — they emit the
+`uiapi { <Object>Create(input: $input) { Record {…} } }` shape; the `types` field tells you
+the input shape. Details: [references/graphiti-cli.md](references/graphiti-cli.md).
+4. **Call `mutate()`** — note the option key is **`mutation`**, not `query`, and that
+   mutations are **never cached**. The runtime `variables` shape differs per operation —
+   values are **raw** (never `{value}`-wrapped; that wrapper is a read-shape thing and breaks
+   writes) and nest under the **entity key**:
 
-```typescript
-declare const __SF_API_VERSION__: string;
-const API_VERSION = typeof __SF_API_VERSION__ !== "undefined" ? __SF_API_VERSION__ : "65.0";
+   ```typescript
+   // create — input.<Entity> holds the new field values
+   variables: { input: { Account: { Name: "Acme", Industry: "Technology" } } }
+   // update — sibling Id alongside the entity key
+   variables: { input: { Id: "001…", Account: { Industry: "Finance" } } }
+   // delete — Id only, no entity key (generic RecordDeleteInput)
+   variables: { input: { Id: "001…" } }
 
-// Connect — file upload config
-const res = await sdk.fetch?.(`/services/data/v${API_VERSION}/connect/file/upload/config`);
+   const { data, errors } = await sdk.graphql!.mutate<CreateAccountMutation, CreateAccountMutationVariables>({
+     mutation: CREATE_ACCOUNT,
+     variables: { input: { Account: { Name: "Acme" } } },
+   });
+   if (errors?.length) throw new Error(errors.map((e) => e.message).join("; "));
+   ```
 
-// Apex REST (no version in path)
-const res = await sdk.fetch?.("/services/apexrest/auth/login", {
-  method: "POST",
-  body: JSON.stringify({ email, password }),
-  headers: { "Content-Type": "application/json" },
-});
+   This is the **`variables` shape** the spine owns; the CLI `types`-field interpretation is in
+   [references/graphiti-cli.md](references/graphiti-cli.md) and the GraphQL-document field constraints
+   (`createable`/`updateable`, `ApiName` references, `@{alias}` chaining) in
+   [references/graphql-hand-authoring.md](references/graphql-hand-authoring.md).
+5. **Re-freshen affected reads.** `mutate()` has no `refresh`. To update a live list
+   after a write, hold the `QueryResult` from your earlier `query()` call (e.g.
+   `accountsResult`) and call `await accountsResult.refresh()` (forced re-fetch, pushes
+   to subscribers) — note this is the read's handle, not anything `mutate()` returns. See
+   **[Freshness & caching](#freshness--caching)**.
 
-// UI API — record with metadata (prefer GraphQL for simple reads)
-const res = await sdk.fetch?.(`/services/data/v${API_VERSION}/ui-api/records/${recordId}`);
-
-// Einstein LLM
-const res = await sdk.fetch?.(`/services/data/v${API_VERSION}/einstein/llm/prompt/generations`, {
-  method: "POST",
-  body: JSON.stringify({ promptTextorId: prompt }),
-});
-```
-
-**Current user**: Do not use Chatter (`/chatter/users/me`). Use GraphQL instead:
-
-```typescript
-const GET_CURRENT_USER = gql`
-  query CurrentUser {
-    uiapi { currentUser { Id Name { value } } }
-  }
-`;
-const response = await sdk.graphql?.(GET_CURRENT_USER);
-```
-
----
-
-## Directory Structure
-
-```
-<project-root>/                              ← SFDX project root
-├── schema.graphql                           ← grep target (lives here)
-├── sfdx-project.json
-├── scripts/graphql-search.sh                ← schema lookup script
-└── force-app/main/default/uiBundles/<app-name>/  ← UI bundle dir
-    ├── package.json                         ← npm scripts
-    └── src/
-```
-
-| Command | Run From | Why |
-|---------|----------|-----|
-| `npm run graphql:schema` | UI bundle dir | Script in UI bundle's package.json |
-| `npm run graphql:codegen` | UI bundle dir | Generate GraphQL types |
-| `npx eslint <file>` | UI bundle dir | Reads eslint.config.js |
-| `bash scripts/graphql-search.sh <Entity>` | project root | Schema lookup |
+Mutation syntax is exacting: wrap under `uiapi(input: { allOrNone: ... })`, only
+`createable`/`updateable` fields, Create/Update output is always `Record` but **Delete has no
+`Record` field — select `Id` only**. Full template + chaining + constraints:
+[references/graphql-hand-authoring.md](references/graphql-hand-authoring.md).
 
 ---
 
-## Quick Reference
+## Beyond record CRUD
 
-### Schema Lookup (from project root)
+The `uiapi` namespace is not just record reads/writes. Before reaching for REST, check
+whether GraphQL already covers it — the same `sdk.graphql!.query()` call, different
+sub-selection. The top-level `uiapi` fields:
 
-Run the search script to get all relevant schema info in one step:
+| Need | Use | Returns |
+|---|---|---|
+| Query records | `uiapi { query { <Entity>(...) } }` | records (the [Read workflow](#read-workflow)) |
+| Counts / sums / grouped rollups without pulling rows | `uiapi { aggregate { <Entity>(groupBy: …) } }` | aggregated buckets |
+| Object/field metadata — labels, data types, `createable`/`updateable`, record types | `uiapi { objectInfos(apiNames: […]) }` | `ObjectInfo[]` |
+| Picklist values (per record type) | `uiapi { objectInfos(objectInfoInputs: […]) { fields … on PicklistField { … } } }` | picklist values |
+| Related-list metadata — display columns, ordering for a parent's related list | `uiapi { relatedListByName(parentApiName, relatedListName) }` | `RelatedListInfo` |
 
-```bash
-bash scripts/graphql-search.sh <EntityName>
+Same rules as record reads: verify every type/field first, `@optional` where FLS applies, check
+`result.errors`. Aggregations can be compiled with `npx graphiti sf-gql-aggregate` (pass
+`groupBy` + `aggregations`); object metadata / picklists / related lists are hand-authored —
+templates: [references/graphql-hand-authoring.md](references/graphql-hand-authoring.md).
+
+> Two related capabilities (the **current-user** record and **layout** delivery) need
+> confirmation against a current org schema before this skill documents a query shape —
+> tracked as a follow-up, not yet covered here.
+
+---
+
+## Freshness & caching
+
+**Caching is ON by default on WebApp.** Every `sdk.graphql!.query()` is cached with a
+**300-second `max-age`** TTL — no opt-in flag, no factory, no import subpath. **Do not
+build your own cache** (no React Query, SWR, `localStorage`, or hand-rolled Map). The
+cache is **shared across SDK instances by `baseUrl`**: the same query+variables from a
+different `createDataSDK()` targeting the same host is a cache hit. Only non-empty,
+error-free `data` is cached. `mutate()` is never cached.
+
+There are **two distinct freshness tools** — keep them separate:
+
+1. **Per-call `cacheControl`** — a one-shot policy override on the query options bag
+   (`"no-cache"` / `"only-if-cached"` / `{ type: "max-age", maxAge: <seconds> }`). The type and
+   exact per-value behavior live in [references/sdk-api.md](references/sdk-api.md#cachecontrol--the-per-call-cache-policy).
+   Take `cacheControl` as an optional param on the read function and expose each distinct policy as
+   a **thin named export in the same data-layer file** — a "call site" is a named export, not a new
+   React component. For `getAccounts(first, after?, cacheControl?)`: `export const refreshAccounts =
+   () => getAccounts(20, undefined, "no-cache")` (and likewise `offlineAccounts` → `"only-if-cached"`,
+   `shortLivedAccounts` → `{ type: "max-age", maxAge: 10 }`). Keep the policy in the data layer.
+2. **Reactive `subscribe` / `refresh`** — a stateful handle on a live `QueryResult`:
+   `result.subscribe(cb)` fires on every later snapshot, `result.refresh()` re-fetches bypassing
+   the cache and pushes to subscribers. Shape in [references/sdk-api.md](references/sdk-api.md#queryresultt--the-reactive-query-handle);
+   subscription lifecycle (always unsubscribe on teardown) in [references/caching.md](references/caching.md).
+
+| Want | Reach for |
+|---|---|
+| Freshness within ~5 min is fine | nothing (default cache) |
+| This one read must bypass the cache (refresh button) | `cacheControl: "no-cache"` |
+| Read only cached data, tolerate misses (offline-first) | `cacheControl: "only-if-cached"` — a miss is **expected, not an error**: it surfaces a `DataNotFoundError` on `result.errors` (no network, no throw). Check `result.errors`, render empty state, **do not throw and do not fall back to the network** — that defeats offline-first. |
+| Tighter/looser TTL for this query | `cacheControl: { type: "max-age", maxAge: 60 }` (`maxAge` is in **seconds**) |
+| Mounted component reflects updates over time | `result.subscribe(cb)` |
+| Re-fetch now + notify all subscribers (e.g. after a mutation) | `result.refresh()` |
+
+`cacheControl` is fire-and-forget at call time; `subscribe`/`refresh` is a live handle.
+Different mechanisms, different jobs — don't conflate "refresh" with "no-cache". Full
+behavior, the reactive-subscription lifecycle, and uncached-surface caveats: [references/caching.md](references/caching.md).
+
+---
+
+## Working on existing code (migration)
+
+**Only enter this path if the existing code actually uses the old API** — i.e. it imports
+`@salesforce/sdk-data` or calls the callable `sdk.graphql(query, vars)` form. For any new
+read/write, ignore migration entirely and use the [Read workflow](#read-workflow) /
+[Write workflow](#write-workflow) — those already show the **only** correct API.
+
+When you do have old code to convert, see **[references/migration.md](references/migration.md)** for the
+before→after diff (imports, query/mutate calls, optional-chaining → non-null assertion, codegen
+type placement) and a checklist. The target API is exactly what the Read/Write workflows above
+prescribe — migrating is just swapping the old form for that.
+
+---
+
+## Platform guardrails — never regress these
+
+These are Salesforce GraphQL platform behaviors, independent of the SDK. Violations cause
+silent runtime failures. (Details + templates: [references/graphql-hand-authoring.md](references/graphql-hand-authoring.md).)
+
+1. **HTTP 200 ≠ success** — always parse `result.errors`; the Promise resolves even on failure.
+2. **Schema is the only source of truth — verify, never invent.** Verify every
+   entity/field/type via graphiti `sf-gql-discover` (preferred) or
+   `bash <skill-dir>/scripts/graphql-search.sh <Entity>` before use. Case-sensitive;
+   `__c`/`__e`; `_Record` entity suffix (v60+). When graphiti is primed, a
+   "not found"/empty/`Cannot query field` answer (including from
+   `graphql-codegen`/`@graphql-eslint`, even when the message points at `schema.graphql`)
+   is a **fact about the org** — wrong name or undeployed/inaccessible metadata, not a tool
+   failure: fix the operation, or deploy the metadata (the **platform-metadata-deploy** skill)
+   + assign perms + refresh (`sf-gql-connect --forceRefresh` / `npm run graphql:schema`). Do
+   not fall back to the script, hand-author around it, or **guess a name** — a guessed entity or
+   field silently fails the whole query at runtime; if lookups aren't converging, **ask the user
+   rather than keep spiraling**. **`schema.graphql` and the codegen output
+   (`src/api/graphql-operations-types.ts`) are read-only generated mirrors — never open or edit
+   them** (honor any `# DO NOT EDIT` marker). Hand-adding a missing type satisfies codegen/lint
+   but grants no org access; it just hides the failure until runtime. Fall back to the script
+   *only* when the CLI can't run at all (no dep / `SCHEMA_PRIME_FAILED`).
+3. **`@optional` on every FLS-gated field at each nesting level** — scalar leaf fields plus each
+   parent/child relationship *and* the fields inside it (FLS fails the whole query otherwise, v65+).
+   **Do NOT** decorate `Id`, the connection plumbing (`edges`, `node`, the connection field), or
+   `pageInfo` — those are not FLS-gated and the graphiti output leaves them bare. Consume with
+   `?.`/`??`. Placement rules: [references/graphql-hand-authoring.md](references/graphql-hand-authoring.md).
+4. **Mutations** wrap under `uiapi(input: { allOrNone: ... })`; set `allOrNone` explicitly;
+   output excludes child/navigated-reference fields; the output field is literally named
+   `Record` (unrelated to the `_Record` entity suffix in rule 2) — Delete → `Id` only. GA v66+.
+5. **Explicit pagination** — always set `first:`, because the server silently caps at 10 and
+   you'll drop rows with no error; forward-only (`first`/`after`, no `last`/`before`);
+   `upperBound` (v59+) raises the per-request ceiling for large sets (when set, `first` must be 200–2000).
+6. **SOQL governor limits apply** — `uiapi` queries compile to SOQL, so the same governor
+   limits are inherited: ≤10 subqueries, ≤5 child→parent levels, ≤1 parent→child level,
+   ≤2,000 records/subquery. Split into multiple requests if you'd exceed them.
+7. **Field value wrappers** — read the raw value via `.value`; `displayValue` is the
+   server-formatted string for UI. When a field is both shown *and* operated on (currency,
+   dates, picklists), select **both** `value` and `displayValue` so you don't reformat on the
+   client. Display-only fields can take just `displayValue`.
+8. **Compound fields** — filter/order on constituents (`BillingCity`), not the wrapper (`BillingAddress`).
+9. **Supported APIs only** — GraphQL (`uiapi`), UI API REST, Apex REST, Connect REST,
+   Einstein LLM via `sdk.fetch`. NOT: Enterprise SOQL `/query`, Aura-enabled Apex, Chatter
+   (use `uiapi.currentUser`). See [references/rest-and-integration.md](references/rest-and-integration.md).
+
+> One SDK convention lives in the workflows, not this list (it's not a platform behavior):
+> always run `npm run graphql:codegen` and use the generated types after writing an operation
+> ([Read workflow](#read-workflow) step 3). Also in the [Pre-flight checklist](#pre-flight-checklist).
+>
+> **graphiti applies most of these for you.** When you compile a query with `sf-gql-*` against an
+> object that's in the primed schema, rules 3 (`@optional`), 4 (mutation `Record` *output*
+> envelope and entity-keyed input — **not** `allOrNone`, which you still add yourself),
+> 5 (`first:`/`pageInfo`), and 7 (`value`/`displayValue` wrappers) come out already satisfied —
+> which is exactly why you **paste the `query` verbatim** rather than re-deriving it. Rules 1
+> (check `result.errors`), 6 (governor limits), 8 (compound fields), and 9 (supported APIs) are
+> still on you. And the automation only fires when the object is primed: a non-empty `warnings`
+> array means it isn't, and the emitted query is **degraded** (bare fields, no guardrails) —
+> see [references/graphiti-cli.md](references/graphiti-cli.md#primed-vs-degraded--why-the-guardrails-sometimes-vanish).
+
+---
+
+## Commands & layout
+
+```text
+<skill-dir>/                            ← wherever this skill is installed
+└── scripts/graphql-search.sh           ← schema lookup (ships with the skill)
+
+<project-root>/                         ← SFDX project root; run the script from here
+├── schema.graphql                      ← generated mirror; grep target (never open or edit; script reads ./schema.graphql)
+└── force-app/main/default/uiBundles/<app>/   ← UI bundle dir
+    ├── package.json                    ← npm scripts
+    └── src/api/                        ← queries, generated types, SDK calls
 ```
 
-| Script Output Section | Used For |
-|-----------------------|----------|
-| Type definition | Field names, parent/child relationships |
-| Filter options | `where:` conditions |
-| Sort options | `orderBy:` |
-| CreateRepresentation | Create mutation field list |
-| UpdateRepresentation | Update mutation field list |
+| Command | Run from | Purpose |
+|---|---|---|
+| `npx graphiti sf-gql-discover '{…}'` | UI bundle dir | Discover objects/fields against the live org (preferred grounding) |
+| `npx graphiti sf-gql-<list\|detail\|aggregate\|create\|update\|delete\|raw> '{…}'` | UI bundle dir | Compile a guardrail-applied query/mutation ([references/graphiti-cli.md](references/graphiti-cli.md)) |
+| `npx graphiti sf-gql-connect '{"org":"<alias>","forceRefresh":true}'` | UI bundle dir | Refresh graphiti's schema cache after a deploy |
+| `bash <skill-dir>/scripts/graphql-search.sh <Entity>` | project root (or pass `--schema <path>`; no tree walk-up) | Schema lookup fallback (grep over local `schema.graphql`) |
+| `npm run graphql:schema` | UI bundle dir | Fetch/refresh `schema.graphql` (for the fallback script) |
+| `npm run graphql:codegen` | UI bundle dir | Generate operation types |
+| `npx eslint <file>` | UI bundle dir | Lint (catches `gql` schema violations) |
 
-### Error Categories
+## Pre-flight checklist
 
-| Error Contains | Resolution |
-|----------------|------------|
-| `Cannot query field` | Field name is wrong — run `graphql-search.sh <Entity>` and use the exact name from the Type definition section |
-| `Unknown type` | Type name is wrong — run `graphql-search.sh <Entity>` to confirm the correct PascalCase entity name |
-| `Unknown argument` | Argument name is wrong — run `graphql-search.sh <Entity>` and check Filter or OrderBy sections |
-| `invalid syntax` | Fix syntax per error message |
-| `validation error` | Field name is wrong — run `graphql-search.sh <Entity>` to verify |
-| `VariableTypeMismatch` | Correct argument type from schema |
-| `invalid cross reference id` | Entity deleted — ask for valid Id |
-
-### Checklist
-
-- [ ] All field names verified via search script (Step 2)
-- [ ] `@optional` applied to all record fields (reads)
-- [ ] Mutations use `uiapi(input: { allOrNone: ... })` wrapper
-- [ ] `first:` specified in every query
-- [ ] Optional chaining in consuming code
-- [ ] `errors` array checked in response handling
-- [ ] Lint passes: `npx eslint <file>`
+- [ ] Surface decided: `sdk.graphql!` only if WebApp-only; otherwise guard with `if (!sdk.graphql) …` ([Surfaces](#surfaces--sdkgraphql-vs-guard))
+- [ ] Every field/entity verified — `sf-gql-discover` (preferred) or `graphql-search.sh` (fallback, against the right schema)
+- [ ] If compiled with graphiti: `warnings: []` confirmed (non-empty = degraded query, don't ship); `query` pasted verbatim
+- [ ] `@optional` on FLS-gated fields + relationships (NOT `Id`/`edges`/`node`/`pageInfo`); `?.`/`??` in consuming code
+- [ ] `result.errors` checked before reading `result.data`
+- [ ] Caching considered: default 300s OK, or `cacheControl` / `refresh` chosen deliberately
+- [ ] `npm run graphql:codegen` run; generated types used; `npx eslint` passes

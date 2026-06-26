@@ -1,8 +1,9 @@
 ---
 name: platform-custom-object-generate
-description: "Use this skill when users need to create, generate, or validate Salesforce Custom Object metadata. Trigger when users mention custom objects, creating objects, object metadata, .object files, sharing models, name fields, or validation rules on objects. Also use when users say things like \"create a custom object\", \"generate object metadata\", \"set up an object for...\", or when they're troubleshooting object deployment errors especially around sharing models and Master-Detail relationships. Always use this skill for any custom object metadata work."
+description: "Use this skill when users need to create, generate, or validate Salesforce Custom Object metadata. Trigger when users mention custom objects, creating objects, object metadata, .object files, sharing models, name fields, or validation rules on objects. Also use when users say things like \"create a custom object\", \"generate object metadata\", \"set up an object for...\", or when they're troubleshooting object deployment errors especially around sharing models and Master-Detail relationships. Always use this skill for any custom object metadata work, including enriching and keeping the object's description current whenever its fields or validation rules change. Do NOT use this skill for non-Custom-Object metadata (Apex, Flows, LWC, Permission Sets, Custom Metadata Types) or for standard Salesforce objects."
 metadata:
-  version: "1.0"
+  version: "1.1"
+  minApiVersion: "60.0"
 ---
 
 ## When to Use This Skill
@@ -13,6 +14,7 @@ Use this skill when you need to:
 - Configure object sharing and security settings
 - Set up object features and capabilities
 - Troubleshoot deployment errors related to custom objects
+- **Add, update, or delete a field OR a validation rule on an existing object** — any of these may make the object's `<description>` stale, so you must refresh it (propose + confirm). This applies equally to validation-rule changes, not just fields. See Section 3.B.
 
 ## Specification
 
@@ -21,6 +23,8 @@ Use this skill when you need to:
 This document defines the mandatory constraints for generating CustomObject metadata XML (`.object-meta.xml` file). The agent must verify these constraints before outputting XML to prevent Metadata API deployment errors.
 
 **File extension:** `.object-meta.xml`
+
+> **🔔 Description freshness — applies to EVERY object change, fields AND validation rules:** Whenever you add, update, or delete a field **or a validation rule** on an object, the `<description>` may now be stale. Before finishing, refresh it per **Section 3.B** (propose, confirm with the user, write). A validation-rule change counts exactly like a field change — the change is **not** done until the description has been reconciled. This is easy to forget on validation-rule edits/deletes — don't.
 
 ---
 
@@ -103,12 +107,47 @@ The agent must choose which features to enable based on the object's intended us
 </nameField>
 ```
 
-### B. Object Description
+### B. Object Description (Enrichment)
 
-**`<description>`**: Mandatory. Every object must contain a professional summary.
+**`<description>`**: **Mandatory** — every Custom Object MUST have one. It must read like human-written documentation, **never** a generic template ("Object used to track and manage...") or a metadata dump ("Contains 8 fields including `Project_Name__c`...").
 
-If the intent is vague, generate a summary:
-> "Object used to track and manage [Intent] within the organization."
+**Always compose an enriched description** — when creating the object, and again on **any** change to it: adding, updating, or deleting a field **or a validation rule** (so it never goes stale). The change — field or validation rule — is never "done" until you've refreshed the object's description. This is not optional; do not ask *whether* to add a description.
+
+**Confirm per change — every time.** Propose and confirm on **each** field/rule change separately. A previous "keep current" applies **only** to that one change; it is **never** standing permission to skip the proposal on a later change. Do not infer a preference from an earlier answer — re-propose and re-ask for every new change.
+
+**Compose** the description (steps below). If the object already has one, use it as a **strong signal** — preserve the business context it carries (domain, team, intent the schema can't reveal) and fold the new field/rule in rather than discarding it.
+
+Then branch on whether a description already exists:
+
+- **No existing description (brand-new object):** there is nothing to overwrite — just write the composed description. **Do not prompt.**
+- **An existing description (update, delete, or any re-enrichment):** never overwrite it silently — you can't tell from the file whether it was hand-written by an admin or generated earlier. Show the proposal, ask, and **STOP — wait for the user's reply before writing:**
+   > Proposed description for `{Object}`:
+   > `<the enriched description>`
+   > Current: `<the existing description>`
+   > Use this? (yes / keep current / edit)
+
+  **You MUST NOT write the `<description>` until the user replies** — showing the diff is not approval, even when the change looks obvious or minor. Then act: *yes* → write the proposed text · *keep current* → leave the existing one untouched (this applies to **this change only** — re-propose on the next one) · *edit* → use the user's wording.
+
+Always end with a `<description>` written.
+
+**Composing the description:**
+
+1. **Classify each field** by how it appears in the description:
+   - **Constrained** (required, unique, externalId, restricted picklist) → selective parenthetical: `VIN (required, external ID)`, `Color (Red/Green only)`
+   - **Behavioral** (formula, roll-up) → describe what it computes: "the Age Years field auto-calculates vehicle age"
+   - **Relationship** (master-detail, lookup) → woven context: "as a child of Account" (never "(Master-Detail to Account)")
+   - **Standard** → label only
+2. **Compose** in this order, using field **labels not API names**:
+   > Purpose → key fields → computed fields → validation rules (as business rules) → "Commonly used for {use cases}."
+3. **Count and trim before writing (required):** count the words; aim ~45, hard ceiling 50. If over, tighten wording first, then drop whole sentences in priority order (use cases → rules → computed; never drop sentences 1–2). Recount. Do not write until ≤ 50.
+
+**Example (Car, 46 words):**
+```xml
+<description>The Car object tracks vehicle inventory and maintenance. It captures Year, VIN (required, external ID), Color (Red/Green only), and Location; the Age Years field auto-calculates vehicle age. VIN is required and Black cars cannot be sold. Commonly used for fleet management, inventory tracking, and service scheduling.</description>
+```
+
+→ For the full workflow and examples, read **`references/description-enrichment.md`**.
+
 ### C. Junction Object Naming
 
 If the object is a many-to-many link between two parents, name the object by combining the two parent entities to ensure the schema remains intuitive.
@@ -234,7 +273,23 @@ Before generating the Custom Object XML, verify:
 - [ ] Do validation rule names NOT end with `__c`?
 - [ ] Do validation rule names follow alphanumeric + underscore pattern?
 
+### Description Enrichment Quality Checks
+- [ ] Opens with "The {Object} object..." + business purpose (not "Object used to track and manage...")
+- [ ] Uses field **labels**, never API names; no "Contains N fields including" dump
+- [ ] Formulas/rollups described by behavior; validations stated as business rules; relationships as context
+- [ ] Includes common use cases ("Commonly used for...") and is **under 50 words**
+- [ ] Folded any current description's business context into the proposed one (didn't discard it)
+- [ ] For an existing description (update/delete/re-enrich), STOPPED and waited for the user's reply before writing — did not treat showing the diff as approval
+
 ### Architectural Checks
-- [ ] Is `<description>` present with a meaningful summary?
+- [ ] Is `<description>` present? (Enriched per Section B — proposed and confirmed with the user before writing.)
 - [ ] Are `<enableSearch>` and `<enableReports>` set to `true` if user-facing?
 - [ ] Does the filename match the intended API name?
+
+---
+
+## Reference File Index
+
+| File | When to read |
+|------|-------------|
+| `references/description-enrichment.md` | Composing or refreshing an object's `<description>` (on create, or when a field/rule changes) — full enrichment workflow, field-prioritization tiers, junction/child handling, edge cases, and more examples |

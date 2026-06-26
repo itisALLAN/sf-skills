@@ -10,7 +10,7 @@
 | Key prefix | `8qv` (record Ids start `8qv…`) |
 | Owning product | Salesforce Archive (Trusted Services Archive) |
 | Kind | **Standard platform entity** (not a custom object) |
-| License gate | Requires the Trusted Services Archive add-on (`TrustedServicesArchive.hasTrustedServicesArchive`) — absent on orgs without the add-on |
+| License gate | Requires the Trusted Services Archive add-on — absent on orgs without the add-on |
 | Name field | Auto-number, mask `ARCV-{0000000000}` |
 | Flow-enabled? | **No** — `isProcessEnabled=false`. A Flow "Get Records" element on it fails: "You can't get ArchiveActivity records in a flow." Query via SOQL / Connect / Reports. |
 

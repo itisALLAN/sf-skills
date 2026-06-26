@@ -3,7 +3,7 @@ name: experience-ui-bundle-app-coordinate
 description: "MUST activate when the user wants to build, create, or generate a React application, React app, web application, single-page application (SPA), or frontend application — even if no project files exist yet. MUST also activate when the project contains a uiBundles/*/src/ directory or sfdx-project.json and the prompt says create, build, construct, or generate a new app, site, or page from scratch — even if the prompt also describes visual styling. MUST also activate when the task spans more than one ui-bundle skill. Use this skill when building a complete app end-to-end. Do NOT use for Lightning Experience apps with custom objects (use platform-lightning-app-coordinate). Do NOT use for single-concern edits to an existing page (use experience-ui-bundle-frontend-generate)."
 metadata:
   version: "1.0"
-  related-skills: experience-ui-bundle-metadata-generate, experience-ui-bundle-features-generate, experience-ui-bundle-salesforce-data-access, experience-ui-bundle-frontend-generate, experience-ui-bundle-agentforce-client-generate, experience-ui-bundle-file-upload-generate, experience-ui-bundle-deploy, experience-ui-bundle-site-generate, experience-ui-bundle-custom-app-generate
+  relatedSkills: experience-ui-bundle-metadata-generate, experience-ui-bundle-features-generate, experience-ui-bundle-salesforce-data-access, experience-ui-bundle-frontend-generate, experience-ui-bundle-agentforce-client-generate, experience-ui-bundle-file-upload-generate, experience-ui-bundle-deploy, experience-ui-bundle-site-generate, experience-ui-bundle-custom-app-generate
 ---
 
 # Building a UI Bundle App
@@ -42,7 +42,7 @@ Build a complete, deployable Salesforce React UI bundle application from a natur
 
 ### Phase 1: Scaffolding (Foundation)
 
-```
+```text
 UI Bundle scaffold (sf template generate ui-bundle)
     v
 Install dependencies (npm install)
@@ -56,7 +56,7 @@ Creates the UI bundle directory structure, meta XML, and optional routing/header
 
 ### Phase 2: Features (Optional)
 
-```
+```text
 Search project code (src/) for existing implementations
     v
 Install dependencies (npm install)
@@ -72,21 +72,25 @@ Installs pre-built, tested feature packages. Skip if the app requires no pre-bui
 
 ### Phase 3: Data Access (Backend Wiring)
 
-```
-Acquire schema (npm run graphql:schema)
+```text
+Ground every entity/field against the org (per experience-ui-bundle-salesforce-data-access)
     v
-Look up entity schema (graphql-search.sh, max 2 runs)
+Generate queries/mutations FROM the verified names (never from guessed fields)
     v
-Generate queries/mutations (use verified field names, @optional on all record fields)
+Generate types (npm run graphql:codegen) and wire into components
     v
 Validate and test (npx eslint, ask user before testing mutations)
 ```
 
-Sets up the data layer using `@salesforce/sdk-data`. GraphQL is preferred for record operations; REST for Connect, Apex, or UI API endpoints.
+Sets up the data layer using the **`@salesforce/platform-sdk`** Data SDK (`createDataSDK().graphql`).
+GraphQL is preferred for record operations; REST for Connect, Apex, or UI API endpoints. **The
+`experience-ui-bundle-salesforce-data-access` skill owns the grounding + authoring workflow — load it and follow
+it; do not substitute a local-schema grep or guessed field names.** Grounding happens against the
+**live org**, so it does not require a local `schema.graphql` to be present.
 
 ### Phase 4: UI (Frontend)
 
-```
+```text
 Layout, navigation, header, and footer (appLayout.tsx)
     v
 Pages (routed views)
@@ -98,7 +102,7 @@ Builds the React UI. References the data layer from Phase 3 and the features fro
 
 ### Phase 5: Integrations (Optional)
 
-```
+```text
 Agentforce chat widget (if requested)
 File upload API (if requested)
 ```
@@ -107,7 +111,7 @@ These are independent and can be executed in parallel if both are needed.
 
 ### Phase 6: Deployment
 
-```
+```text
 Org authentication
     v
 Pre-deploy UI bundle build (npm install + npm run build)
@@ -132,7 +136,7 @@ Choose **one** of the following based on the app's audience:
 
 #### Phase 7a: Experience Site (External)
 
-```
+```text
 Resolve site properties (siteName, appDevName, etc.)
     v
 Generate site metadata (Network, CustomSite, DigitalExperience)
@@ -144,7 +148,7 @@ Creates the Digital Experience site that hosts the UI bundle. Use when the user 
 
 #### Phase 7b: Custom Application (Internal)
 
-```
+```text
 Resolve app properties (appName, appNamespace, appLabel)
     v
 Generate CustomApplication metadata (applications/*.app-meta.xml)
@@ -172,9 +176,16 @@ Creates a Custom Application entry in the Lightning App Launcher. Use when the a
 6. Determine if an Experience Site is needed
 7. Identify external domains for CSP registration
 
+> **The plan MUST contain an explicit grounding step before any query authoring.** Do not list
+> guessed object/field names as settled facts and defer verification to codegen. The data-access
+> portion of the plan must read: "verify these entities/fields against the org (via
+> `experience-ui-bundle-salesforce-data-access`), then author queries from the verified names." A plan that
+> authors queries first and codegens later is the failure mode that produces guessed fields and
+> hand-stubbed types — do not emit it.
+
 **Output: Build Plan**
 
-```
+```text
 UI Bundle App Build Plan: [App Name]
 
 SCAFFOLDING:
@@ -187,8 +198,9 @@ FEATURES:
 
 DATA ACCESS:
 - Objects: [Salesforce objects to query/mutate]
-- Queries: [list of GraphQL queries needed]
-- REST endpoints: [Apex REST or Connect API calls, if any]
+- Grounding: [verify each object + its fields against the org via experience-ui-bundle-salesforce-data-access BEFORE authoring — list the objects/fields to confirm, not assumed-correct names]
+- Queries: [GraphQL queries to author FROM the verified names]
+- REST endpoints: [only where GraphQL/uiapi genuinely cannot cover it — not as a fallback for fields that were hard to verify]
 
 UI:
 - Layout: [description of app shell/navigation]
@@ -245,7 +257,7 @@ Execute each phase sequentially. Complete all steps within a phase before moving
 
 **Phase 3 -- Data Access** (skip if no Salesforce data needed)
 - 1. Load skill: Invoke `experience-ui-bundle-salesforce-data-access`
-- 2. Execute: Fetch schema, look up entities, generate queries/mutations, wire into components
+- 2. Execute: **Ground entities/fields against the org first** (per the skill), then author queries/mutations **from the verified names**, run codegen, wire into components. Never guess fields or hand-edit generated types.
 - 3. Verify: Run `npx eslint` on files with GraphQL queries
 - 4. Checkpoint: Data layer ready -- proceed to Phase 4
 
@@ -283,7 +295,7 @@ Execute each phase sequentially. Complete all steps within a phase before moving
 
 After all phases complete, present a build summary:
 
-```
+```text
 UI Bundle App Build Complete: [App Name]
 
 PHASES COMPLETED:
@@ -314,7 +326,7 @@ Before presenting the build as complete, verify:
 - [ ] **Lint passes**: `npx eslint src/` reports 0 errors
 - [ ] **No boilerplate**: All placeholder text, default titles, and template content has been replaced
 - [ ] **Navigation works**: `appLayout.tsx` has real nav items matching created pages
-- [ ] **Data layer wired**: Components use `@salesforce/sdk-data` (if data access phase was executed)
+- [ ] **Data layer wired**: Components use the `@salesforce/platform-sdk` Data SDK (`createDataSDK().graphql`), with all entities/fields grounded against the org — not guessed (if data access phase was executed)
 - [ ] **CSP registered**: All external domains have CSP Trusted Site metadata (if applicable)
 
 ---

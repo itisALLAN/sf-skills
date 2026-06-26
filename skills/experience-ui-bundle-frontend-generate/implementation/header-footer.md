@@ -100,7 +100,7 @@ export default function AppLayout() {
 
 `AppLayout` is the single shell rendered at the root route. Every page is a child rendered via `<Outlet />`. Placing the header and footer here ensures they appear on every page without touching individual pages or the route registry.
 
-```
+```text
 AppLayout (appLayout.tsx)
 ├── AppHeader          ← renders on every page
 ├── NavigationMenu     ← keep if already present

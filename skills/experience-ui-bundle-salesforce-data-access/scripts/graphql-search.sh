@@ -2,13 +2,20 @@
 set -euo pipefail  # exit on error (-e), undefined vars (-u), and propagate pipeline failures (-o pipefail)
 # graphql-search.sh — Look up one or more Salesforce entities in schema.graphql.
 #
-# Run from the SFDX project root (where schema.graphql lives):
-#   bash scripts/graphql-search.sh Account
-#   bash scripts/graphql-search.sh Account Contact Opportunity
+# Run from the SFDX project root, where schema.graphql lives:
+#   bash <skill-dir>/scripts/graphql-search.sh Account
+#   bash <skill-dir>/scripts/graphql-search.sh Account Contact Opportunity
 #
-# Pass a custom schema path with -s / --schema:
-#   bash scripts/graphql-search.sh -s /path/to/schema.graphql Account
-#   bash scripts/graphql-search.sh --schema ./other/schema.graphql Account Contact
+# The script does NOT search up the directory tree — an ancestor schema.graphql
+# may belong to a DIFFERENT org, and silently matching it would validate fields
+# against the wrong schema. If schema.graphql is not at ./ you must point the
+# script at the right file explicitly (resolution order, first hit wins):
+#   1. -s / --schema <path>      explicit flag
+#   2. $GRAPHQL_SCHEMA env var   explicit override
+#   3. ./schema.graphql          (current working directory only)
+#
+#   bash <skill-dir>/scripts/graphql-search.sh -s force-app/main/default/uiBundles/<app>/schema.graphql Account
+#   GRAPHQL_SCHEMA=/abs/path/schema.graphql bash <skill-dir>/scripts/graphql-search.sh Account
 #
 # Output sections per entity:
 #   1. Type definition          — all fields and relationships
@@ -19,7 +26,7 @@ set -euo pipefail  # exit on error (-e), undefined vars (-u), and propagate pipe
 #   6. Update mutation wrapper  — <Entity>UpdateInput
 #   7. Update mutation fields   — <Entity>UpdateRepresentation (for update mutations)
 
-SCHEMA="./schema.graphql"
+SCHEMA=""
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -56,10 +63,26 @@ if [ $# -eq 0 ]; then
   exit 1
 fi
 
+# ── Schema resolution ────────────────────────────────────────────────────────
+# NO directory walk-up: resolve only from an explicit flag, an explicit env var,
+# or schema.graphql in the CURRENT directory. Searching ancestors risks matching
+# an unrelated project's schema and validating fields against the wrong org.
+# Resolution order (first hit wins): -s/--schema, then $GRAPHQL_SCHEMA, then ./schema.graphql.
+
+if [ -z "$SCHEMA" ] && [ -n "${GRAPHQL_SCHEMA-}" ]; then
+  SCHEMA="$GRAPHQL_SCHEMA"
+fi
+
+if [ -z "$SCHEMA" ]; then
+  SCHEMA="./schema.graphql"
+fi
+
 if [ ! -f "$SCHEMA" ]; then
-  echo "ERROR: schema.graphql not found at $SCHEMA"
-  echo "  Make sure you are running from the SFDX project root, or pass the path explicitly:"
+  echo "ERROR: schema.graphql not found at '$SCHEMA'."
+  echo "  This script does NOT search parent directories (an ancestor schema may be the wrong org's)."
+  echo "  Run from the SFDX project root where schema.graphql lives, or point at it explicitly:"
   echo "    bash $0 --schema <path/to/schema.graphql> <EntityName>"
+  echo "    GRAPHQL_SCHEMA=<path/to/schema.graphql> bash $0 <EntityName>"
   echo "  If the file is missing entirely, generate it from the UI bundle dir:"
   echo "    cd force-app/main/default/uiBundles/<app-name> && npm run graphql:schema"
   exit 1
@@ -77,6 +100,10 @@ if [ ! -s "$SCHEMA" ]; then
   echo "    cd force-app/main/default/uiBundles/<app-name> && npm run graphql:schema"
   exit 1
 fi
+
+# Announce the resolved schema so a wrong-file match is visible, not silent.
+# stderr keeps it out of the parsed lookup output on stdout.
+echo "[graphql-search] using schema: $SCHEMA" >&2
 
 # ── Helper: extract lines from a grep match through the closing brace ────────
 # Prints up to MAX_LINES lines after (and including) the first match of PATTERN.

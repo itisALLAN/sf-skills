@@ -1,13 +1,54 @@
 # Salesforce Archive Connect API — Operations Reference
 
-All operations are under the base path `/platform/data-resilience/archive/`. Contracts verified live against archived data. Read the operation you need before constructing the call — several contracts are non-obvious.
+Read the operation you need before constructing the call — several contracts are non-obvious.
+
+## How to call these operations
+
+Every operation is a REST call defined by three things:
+
+- **method** — `GET` or `POST` (see the `Method + Path` column below)
+- **path** — the resource path, e.g. `/platform/data-resilience/archive/search`
+- **body** — a JSON object (POST only); GET operations carry their inputs as query-string params and send no body
+
+```text
+{method} /platform/data-resilience/archive/{operation-path}
+```
+
+The `/platform/...` path *is* the complete resource path — there is **no `/connect` segment** and you do not append the operation name (details below). Use API version `67.0`.
+
+**Send it with whatever Connect/REST API tool your environment provides** — an MCP server that invokes Connect/REST APIs, the `sf` CLI, or any REST client. Map the three primitives above to that tool's parameters.
+
+**Whether the path needs the `/services/data/v67.0` prefix depends on the tool, not on MCP-vs-CLI** — some tools want the full versioned URL, others take the bare `/platform/...` path and add the version/host themselves. Check the tool's own docs; if a bare path returns `NOT_FOUND`, try the full versioned form (and vice-versa).
+
+**If using the `sf` CLI** — supply the **full versioned URL** and pass the body inline. The `--body` flag takes the JSON itself, **not** a filename (a bare filename is sent verbatim → `JSON_PARSER_ERROR`):
+
+```bash
+sf api request rest "/services/data/v67.0/platform/data-resilience/archive/search" \
+  --method POST \
+  --body '{"sobjectName":"Account","filters":[{"field":"Name","value":"salesforce.com"}],"fields":["Id","Name","Phone"]}' \
+  --target-org <org-alias>
+```
+
+**If using an MCP server / other REST client** — map method, path, and body to its parameters (names vary per tool; check its docs). For example, the body for the same search is:
+
+```text
+{"sobjectName":"Account","filters":[{"field":"Name","value":"salesforce.com"}],"fields":["Id","Name","Phone"]}
+```
+
+(For GET operations, append the inputs as query-string params on the path and send no body.)
+
+> Two path rules that otherwise surface as a misleading error, **regardless of how you send the call**:
+> - **Use the literal path from the `Method + Path` column below — never build one from the operation name.** The operation identifiers in this doc (`search-archived-records`, `unarchive-records`, …) are *names*, not URL segments. The real path is short and rarely matches the name: `searchArchivedRecords` → `POST /search` (NOT `/search-archived-records`), `unarchiveRecords` → `POST /unarchive`, `getArchiveStorageUsed` → `GET /storage/archive-used`. Synthesizing the path from the operation name (e.g. kebab-casing it and appending it) produces a route that returns **404** even though the operation exists. Always copy the path string verbatim from the table.
+> - **The path stops at `/platform/data-resilience/archive/...`** — there is no `/connect` segment, even though this is a Connect API. Inserting one returns `NOT_FOUND` for the whole namespace, which can read as "Archive is disabled" — it isn't; it's the path.
 
 ## Operations Summary
 
-| Operation | Purpose | Method + Path | Verify with |
+The first column is the **operation name** used to refer to each op in this skill — it is **not** part of the path. The method and path to send are in the **Method + Path** column; each path shown (e.g. `POST /search`) is shorthand for `POST /platform/data-resilience/archive/search`.
+
+| Operation (name only — NOT a path segment) | Purpose | Method + Path (send THIS) | Verify with |
 |-----------|---------|---------------|-------------|
 | `search-archived-records` | read | `POST /search` | — |
-| `search-archived-records-with-sharing-rules` | read (Agentforce) | `POST /search/with-sharing-rules` | — |
+| `search-archived-records-with-sharing-rules` | read | `POST /search/with-sharing-rules` | — |
 | `get-search-archived-records-next-page` | read | `GET /search/next/{scrollId}` | — |
 | `run-analyzer` | write | `POST /analyzer/run` | `get-analyzer-report` |
 | `get-analyzer-report` | read | `GET /analyzer/report` | — |
@@ -19,8 +60,6 @@ All operations are under the base path `/platform/data-resilience/archive/`. Con
 | `get-execution-details-stream-url` | read | `GET /log/execution-details-stream-url` | — |
 | `get-failed-records-stream-url` | read | `GET /log/failed-records-stream-url` | — |
 | `get-archive-storage-used` | read | `GET /storage/archive-used` | — |
-
-**Deprecated — do not use** (no successor; currently 500): `global-search-by-id`, `get-global-search-results`, `view-archived-records`. Use `search-archived-records` (+ `get-search-archived-records-next-page`) for all archived-record lookups.
 
 ### Verify-after-write dependencies
 
@@ -44,12 +83,12 @@ Search archived records by object, filters, date ranges, and sort.
 - `sobjectName` *(string)* — API name of the sObject to search.
 - `filters` *(array)* — Filter conditions, each `{field, value}` where **both are required strings**. `value` is a single string — **not** an array, **not** nullable (null/omitted → `400 "This field may not be null"`). There is **no `operator` field**. **At least 1, up to 6 filters, combined with AND only** (OR is not supported). Example: `[{"field":"Subject","value":"Foo"}]`.
 - `dateRanges` *(array)* — Primary date filter: array of `{field, from, to}`. `from`/`to` must be full ISO-8601 datetime (`"2020-01-01T00:00:00Z"`); date-only → `400 JSON_PARSER_ERROR` (xsd:dateTime). Use the special field `archive_date` to filter by archive date instead of `CreatedDate`/`ModifiedDate`.
-- `dateRange` *(object)* — Optional **singular** convenience range `{field, from, to}`; the controller folds it into `dateRanges` (one-element equivalent). Same singular shape that `unarchive-records` uses.
+- `dateRange` *(object)* — Optional **singular** convenience range `{field, from, to}`; treated as a one-element `dateRanges`. Same singular shape that `unarchive-records` uses.
 - `fields` *(array)* — Field API names to return.
 - `pageSize` *(integer)* — Records per page; default 25, max 1000.
 - `sortDirection` *(string)* — `asc`/`desc`, case-insensitive, default `asc`; an invalid value → 400.
 
-**Output**: HTTP **201**, `body = { records[], total_result_count, scroll_id }`, `body.statusCode = 200`, `errorMessage` null on success. **Branch on `body.statusCode`, not the HTTP code** — once past framework validation the response is always 200/201 even on logical failure, with the error in `errorMessage` + `statusCode`.
+**Output**: HTTP **201**, `body = { records[], total_result_count, scroll_id }`, `body.statusCode = 200`, `errorMessage` null on success. **Branch on `body.statusCode`, not the HTTP code** — once past request validation the response is always 200/201 even on logical failure, with the error in `errorMessage` + `statusCode`.
 
 **Excluded objects**: `Feed`, `History`, `Relation`, `Share` are not searchable; Files/Attachments are not retrievable.
 
@@ -66,7 +105,7 @@ Read records inline from each response. If `body.scroll_id != "-1"`, call `get-s
 
 ## search-archived-records-with-sharing-rules (`POST /search/with-sharing-rules`)
 
-Archive search **optimized for Agentforce agents**. (There is no `/search/related` endpoint — this is the operation that takes the JSON filter map.) Gated by the **`ViewArchivedRecords`** user permission (unlike plain `search-archived-records`, which uses `ViewSearchPage`).
+Archive search that enforces the user's sharing rules. (There is no `/search/related` endpoint — this is the operation that takes the JSON filter map.) Gated by the **`ViewArchivedRecords`** user permission (unlike plain `search-archived-records`, which uses `ViewSearchPage`).
 
 **Required**: `objectName`, `filtersJson`.
 
@@ -83,7 +122,7 @@ Archive search **optimized for Agentforce agents**. (There is no `/search/relate
 
 ## run-analyzer (`POST /analyzer/run`) + get-analyzer-report (`GET /analyzer/report`)
 
-`run-analyzer` triggers the analyzer; HTTP 201, output `message` *(string, human-readable status)*. **`isRunning` is ALWAYS `null`** — the controller only populates `message`; never branch on `isRunning`. Poll `get-analyzer-report` to confirm completion. Non-destructive / idempotent.
+`run-analyzer` triggers the analyzer; HTTP 201, output `message` *(string, human-readable status)*. **`isRunning` is ALWAYS `null`** — only `message` is populated; never branch on `isRunning`. Poll `get-analyzer-report` to confirm completion. Non-destructive / idempotent.
 
 `get-analyzer-report` returns `body` with: `topRecords[]` (`{objectName, objectLabel, objectIcon, size, count, usagePercent}` per archivable sObject), `topFiles[]` (parallel shape for files), `fileGeneralStorage`/`dataGeneralStorage` (`{storageUsed, storageRemaining, usagePercent}`), and `createdDateReport` (`"DD/MM/YYYY HH:MM:SS"`).
 
@@ -96,7 +135,7 @@ Restore archived records back into live storage by criteria.
 **Inputs**:
 - `sobjectName` *(string)* — sObject whose records to unarchive.
 - `filters` *(array)* — criteria identifying which archived records to restore.
-- `dateRange` *(object)* — optional **SINGULAR** range `{field, from, to}` (reads `getDateRange()`, unlike `/search` which uses plural `dateRanges`); full ISO-8601 datetimes. Omit to unarchive by filters alone.
+- `dateRange` *(object)* — optional **SINGULAR** range `{field, from, to}` (unlike `/search`, which uses the plural `dateRanges`); full ISO-8601 datetimes. Omit to unarchive by filters alone.
 
 **Caps**: ≤1000 matched records (else not processed); ≤50 unarchive requests/hour/org. Restores the **whole archived hierarchy** of each match. Requires the **`UnarchiveSdk`** user permission (on top of org-level Archive enablement).
 
@@ -122,7 +161,7 @@ Submits a PII-masking (anonymization) request — irreversibly replaces detected
 
 **Behavior**: permanent; one-time per record (re-requests on an already-masked record are ignored); shares the 10,000/day RTBF rate limit; **PII fields are auto-detected** (you cannot choose them); records under legal hold / retention lock are excluded; cascades to child records. Available **only via this API** (not in the Archive UI).
 
-**Permission**: gated by the **`Rtbf`** user permission — the SAME permission as RTBF (`maskArchivedRecords` runs the RTBF access check), not a separate masking entitlement.
+**Permission**: gated by the **`Rtbf`** user permission — the SAME permission as RTBF, not a separate masking entitlement.
 
 **Output**: HTTP 201, `body.request_id` *(UUID)*. Poll `get-masking-status` (path param `requestId`); status reaches **HANDLED** when complete. **Rollback**: none — anonymization is permanent.
 
@@ -154,4 +193,4 @@ Returns `body.usedStorage[4]` (doubles — per-tier bytes consumed) and `body.av
 | 2 | Archive-tier **RECORDS** storage |
 | 3 | Archive-tier **FILE** storage |
 
-**`availableStorage[2]` and `[3]` (the archive tier) are ALWAYS 0**: the controller hardcodes them (`ARCHIVER_AVAILABLE_STORAGE = 0`) because archive storage is unmetered, so a `0` there means "not tracked", NOT "no space left". Only `availableStorage[0]`/`[1]` (live org data/file remaining) are real. All values rounded to 2 decimals.
+**`availableStorage[2]` and `[3]` (the archive tier) are ALWAYS 0**: archive storage is unmetered, so a `0` there means "not tracked", NOT "no space left". Only `availableStorage[0]`/`[1]` (live org data/file remaining) are real. All values rounded to 2 decimals.

@@ -34,7 +34,7 @@ npm install @salesforce/ui-bundle-template-feature-react-file-upload
 Dependencies are automatically installed:
 
 - `@salesforce/ui-bundle` (API client)
-- `@salesforce/sdk-data` (data SDK)
+- `@salesforce/platform-sdk` (data SDK; the old `@salesforce/sdk-data` name is dead — see the `experience-ui-bundle-salesforce-data-access` skill)
 
 ## 2. Understand the three upload patterns
 
