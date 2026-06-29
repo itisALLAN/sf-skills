@@ -1,3 +1,17 @@
+# [1.27.0](https://github.com/forcedotcom/sf-skills/compare/1.26.0...1.27.0) (2026-06-29)
+
+
+### Bug Fixes
+
+* @W-22259678@ update stale skill name references ([#301](https://github.com/forcedotcom/sf-skills/issues/301)) ([48ef93f](https://github.com/forcedotcom/sf-skills/commit/48ef93f39d25792029ea3a4287c845d842706f6f))
+
+
+### Features
+
+* Update stale cross-references to renamed skills @W-23223262@ ([fae028f](https://github.com/forcedotcom/sf-skills/commit/fae028fd99a366de12a41d5e256020aee82ffe29))
+
+
+
 # [1.26.0](https://github.com/forcedotcom/sf-skills/compare/1.25.0...1.26.0) (2026-06-26)
 
 
