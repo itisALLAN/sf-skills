@@ -1,10 +1,18 @@
 ---
 name: dx-code-analyzer-run
-description: "Run Salesforce Code Analyzer to scan code for security, performance, best practice, and code style violations. Supports all engines (PMD, ESLint, CPD, RetireJS, Flow, SFGE, ApexGuru), targets (files, folders, git diff), categories, and severities. Also handles post-scan exploration: filtering results by engine/severity/category/file, and explaining what specific rules mean. TRIGGER when: user says 'scan my code', 'check for security issues', 'run PMD/ESLint', 'find duplicates', 'analyze Flows', 'check vulnerable libraries', 'AppExchange review', 'lint my LWC', 'static analysis', 'code quality', 'show only security violations', 'what is this rule', 'explain ApexCRUDViolation', 'filter results', or mentions engines/file types (.cls, .trigger, .js, .flow-meta.xml). Use this skill for scanning, exploring results, understanding rules, and listing available rules. DO NOT TRIGGER when: user wants to fix code without scanning, or asks ONLY about installation/configuration."
-allowed-tools: Read, Bash(sf code-analyzer), Bash(node), Bash(git diff), Bash(date), Write, Edit
+description: "Run Salesforce Code Analyzer to scan code for security, performance, best practice, and code style violations. Supports all engines (PMD, ESLint, CPD, RetireJS, Flow, SFGE, ApexGuru), targets (files, folders, git diff), categories, and severities. Also handles post-scan exploration: filtering results by engine/severity/category/file, and explaining what rules mean. TRIGGER when: user says 'scan my code', 'check security issues', 'run PMD/ESLint', 'find duplicates', 'analyze Flows', 'check vulnerable libraries', 'AppExchange review', 'lint my LWC', 'static analysis', 'code quality', 'show security violations', 'what is this rule', 'explain ApexCRUDViolation', 'filter results', or mentions engines/file types (.cls, .trigger, .js, .flow-meta.xml). Use this skill for scanning, exploring results, and listing rules. DO NOT TRIGGER when: user asks only about installation/configuration (use dx-code-analyzer-configure), or wants to create a custom rule (use dx-code-analyzer-custom-rule-create)."
 metadata:
   version: "1.0"
-  argument-hint: "[target-path] [--engine pmd|eslint|cpd|retire-js|regex|flow|sfge|apexguru] [--category Security|Performance|BestPractices|...] [--severity 1-5] [--diff]"
+  relatedSkills:
+    - "dx-code-analyzer-configure"
+    - "dx-code-analyzer-custom-rule-create"
+  cliTools:
+    - tool: ["sf"]
+      semver: ">=2.0.0"
+    - tool: ["node"]
+      semver: ">=18.0.0"
+    - tool: ["git"]
+      semver: ">=2.0.0"
 ---
 
 # Running Code Analyzer Skill
@@ -67,11 +75,13 @@ Any aggregation, filter, or rank question ("which file has the most violations?"
 
 ## Overview
 
+> **Ecosystem:** This skill is part of a 3-skill Code Analyzer suite — `dx-code-analyzer-run` (scans & results) · `dx-code-analyzer-configure` (setup, config, CI/CD) · `dx-code-analyzer-custom-rule-create` (custom rule authoring).
+
 This skill translates natural-language requests ("scan for security issues", "check my changes") into the correct `sf code-analyzer run` command, executes scans across any combination of engines/targets/severities, and presents actionable results. When engine-provided fixes are available, it discovers them, asks for user confirmation, applies them safely, and offers verification. Use it for static analysis, security reviews, AppExchange certification, code-quality checks, and finding duplicates/vulnerabilities in Salesforce projects.
 
 **In scope:** running scans, parsing/filtering/ranking results, applying engine auto-fixes, diff-based scans, all output formats (JSON/HTML/SARIF/CSV/XML), describing/listing rules, scan-failure troubleshooting.
 
-**Out of scope:** installing/configuring `sf` or the plugin (→ `dx-code-analyzer-configure`), writing custom rules/engines, AI-generated fixes beyond engine-provided ones, deep refactoring, CI/CD setup (→ `dx-code-analyzer-configure`).
+**Out of scope:** installing/configuring `sf` or the plugin (→ `dx-code-analyzer-configure`), writing custom rules/engines (→ `dx-code-analyzer-custom-rule-create`), AI-generated fixes beyond engine-provided ones, deep refactoring, CI/CD setup (→ `dx-code-analyzer-configure`).
 
 **Allowed tools:** Bash (`sf code-analyzer`, `node`, `git diff`, `date`), Read, Write, Edit. **Forbidden:** any MCP tool, Agent tool, web tools, other skills, Python, `jq`, inline scripts/heredocs. This skill owns the complete scan-fix-verify-query-explain workflow end-to-end.
 
@@ -203,7 +213,7 @@ Use the **Bash tool only** — never the `run_code_analyzer` MCP tool.
 
 1. Generate the timestamp via Bash: `date +%Y%m%d-%H%M%S` → e.g. `20260512-143022`.
 2. Tell the user:
-   ```
+   ```text
    Starting scan...
    Results: ./code-analyzer-results-20260512-143022.json
    Log:     ./code-analyzer-results-20260512-143022.log
@@ -237,7 +247,7 @@ node "<skill_dir>/scripts/parse-results.js" "./code-analyzer-results-TIMESTAMP.j
 
 ### Presentation template
 
-```
+```text
 ## Scan Complete
 
 **Found X violations** across Y files.
@@ -296,7 +306,7 @@ node "<skill_dir>/scripts/discover-fixes.js" "./code-analyzer-results-TIMESTAMP.
 
 ### 6.3 Present + ASK (then STOP)
 
-```
+```text
 ### Engine-Provided Fixes Available
 **X of Y violations** have auto-fixes provided by the analysis engine:
 
@@ -327,7 +337,7 @@ node "<skill_dir>/scripts/summarize-fixes.js" "./code-analyzer-results-TIMESTAMP
 
 Then present:
 
-```
+```text
 ### Engine-Provided Fixes Applied Successfully ✓
 **Applied X auto-fixes across Y files.**
 
@@ -438,6 +448,29 @@ node "<skill_dir>/scripts/list-rules.js" "<selector>" [options]
 | "top 10 security rules" | `Security` | `--top 10` |
 
 Filters: `--engine`, `--severity`, `--top` (default 100), `--count-only`. The script pre-validates selector tokens (catches typos like `secruity`) before calling the CLI. Presentation: `<skill_dir>/references/post-scan-workflows.md`.
+
+---
+## Cross-Skill Integration
+
+This skill is part of a 3-skill Code Analyzer ecosystem. Hand off cleanly rather than attempting work that belongs to another skill.
+
+### When THIS skill delegates to `dx-code-analyzer-configure`:
+
+- Pre-flight check fails (CLI missing, plugin not installed, engine prereqs broken) → stop, delegate, return here after fix
+- User asks to set up CI/CD, edit `code-analyzer.yml`, change severities, or disable engines → delegate entirely
+
+### When THIS skill delegates to `dx-code-analyzer-custom-rule-create`:
+
+- User asks to create a new rule, write XPath, write a regex rule, or enforce a pattern not covered by built-in rules → delegate entirely. Do NOT attempt to create rules here.
+
+### When other skills hand off HERE:
+
+- `dx-code-analyzer-configure` completes setup → proceed with scan (Step 1–5)
+- `dx-code-analyzer-custom-rule-create` finishes creating a rule → proceed with scan targeting the new rule (e.g., `--rule-selector pmd:<RuleName>`) to verify it works
+
+### Ownership boundary
+
+This skill owns the complete **scan → explore → fix** workflow end-to-end. It does NOT own installation, config file management, or rule authoring.
 
 ---
 
